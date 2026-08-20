@@ -1,0 +1,55 @@
+{
+    "manifest_version":  3,
+    "name":  "RUTE - AI Trading Assistant",
+    "version":  "1.0.2",
+    "description":  "AI-powered trading assistant for forex and stocks with real-time recommendations and automated trade execution",
+    "icons":  {
+                  "128":  "icons/icon128.png",
+                  "192":  "icons/icon192.png",
+                  "512":  "icons/icon512.png"
+              },
+    "permissions":  [
+                        "storage",
+                        "notifications",
+                        "alarms",
+                        "activeTab",
+                        "scripting"
+                    ],
+    "host_permissions":  [
+                             "https://*.tradingview.com/*",
+                             "https://*.investing.com/*",
+                             "https://finance.yahoo.com/*",
+                             "http://localhost:8001/*",
+                             "http://127.0.0.1:8001/*"
+                         ],
+    "content_security_policy":  {
+                                    "extension_pages":  "script-src \u0027self\u0027 \u0027wasm-unsafe-eval\u0027; object-src \u0027self\u0027; style-src \u0027self\u0027 \u0027unsafe-inline\u0027;"
+                                },
+    "background":  {
+                       "service_worker":  "background.js",
+                       "type":  "module"
+                   },
+    "action":  {
+                   "default_popup":  "index.html",
+                   "default_icon":  {
+                                        "128":  "icons/icon128.png",
+                                        "192":  "icons/icon192.png",
+                                        "512":  "icons/icon512.png"
+                                    }
+               },
+    "content_scripts":  [
+                            {
+                                "matches":  [
+                                                "https://*.tradingview.com/*",
+                                                "https://*.investing.com/*",
+                                                "https://finance.yahoo.com/*",
+                                                "http://localhost:8001/*",
+                                                "http://127.0.0.1:8001/*"
+                                            ],
+                                "js":  [
+                                           "content.js"
+                                       ],
+                                "run_at":  "document_idle"
+                            }
+                        ]
+}

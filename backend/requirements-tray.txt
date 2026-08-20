@@ -1,0 +1,7 @@
+# RUTE Tray App Dependencies
+# Install into the same venv: venv\Scripts\pip install -r requirements-tray.txt
+pystray
+Pillow
+psutil
+python-dotenv
+requests

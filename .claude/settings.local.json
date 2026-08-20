@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(findstr:*)",
+      "Bash(start http://localhost:8000/docs)",
+      "Bash(dir \"C:\\Users\\Danny''s PC\\OneDrive\\Documents\\Personal Works\\CODE\\RUTE\\dist\")",
+      "Bash(dir \"C:\\Users\\Danny''s PC\\OneDrive\\Documents\\Personal Works\\CODE\\RUTE\\dist\\src\")",
+      "Bash(dir:*)",
+      "Bash(copy:*)",
+      "Bash(timeout /t 3)",
+      "Bash(pip install:*)",
+      "Bash(ping:*)",
+      "Bash(nul)",
+      "Bash(curl:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

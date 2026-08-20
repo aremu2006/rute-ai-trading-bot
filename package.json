@@ -1,0 +1,32 @@
+{
+  "name": "rute-trading-assistant",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "AI-powered trading assistant Chrome extension for forex and stocks",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "backend": "cd backend & if (Test-Path venv) { venv\\Scripts\\python -m uvicorn main:app --reload } else { python -m uvicorn main:app --reload }"
+  },
+  "dependencies": {
+    "date-fns": "^2.30.0",
+    "framer-motion": "^10.16.4",
+    "lucide-react": "^0.294.0",
+    "ogl": "^1.0.11",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.254",
+    "@types/node": "^20.11.0",
+    "@types/react": "^18.2.37",
+    "@types/react-dom": "^18.2.15",
+    "@vitejs/plugin-react": "^4.2.0",
+    "autoprefixer": "^10.4.16",
+    "postcss": "^8.4.31",
+    "tailwindcss": "^3.3.5",
+    "typescript": "^5.2.2",
+    "vite": "^5.0.0"
+  }
+}
