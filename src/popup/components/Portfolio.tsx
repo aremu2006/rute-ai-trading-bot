@@ -247,21 +247,22 @@ const Portfolio: React.FC = () => {
                     </div>
 
                     {log.type === 'skip' && (
-                      <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-3 mb-3">
-                        <div className="flex items-center gap-2 mb-1">
-                          <Shield className="w-4 h-4 text-red-400" />
-                          <span className="text-red-400 font-bold text-xs uppercase tracking-wider">Trade Rejected</span>
+                      <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-3 mb-3 flex flex-col gap-3">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <Shield className="w-4 h-4 text-red-400" />
+                            <span className="text-red-400 font-bold text-xs uppercase tracking-wider">Trade Rejected</span>
+                          </div>
+                          {log.confidence !== undefined && (
+                            <div className="bg-background border border-red-500/30 px-2 py-1 rounded flex items-center gap-1.5 shadow-inner">
+                              <span className="text-[10px] text-muted uppercase tracking-wider font-semibold">Confidence</span>
+                              <span className="text-xs text-red-400 font-mono font-bold">{log.confidence}%</span>
+                            </div>
+                          )}
                         </div>
                         <p className="text-red-200/90 text-sm leading-relaxed font-medium">
                           {log.message}
                         </p>
-                        {log.signals && log.signals.length > 0 && (
-                          <div className="mt-2 pt-2 border-t border-red-500/20 grid grid-cols-1 gap-1">
-                            {log.signals.map((sig: string, i: number) => (
-                              <div key={i} className="text-xs font-mono text-red-300/80">• {sig}</div>
-                            ))}
-                          </div>
-                        )}
                       </div>
                     )}
                     

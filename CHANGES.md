@@ -648,3 +648,7 @@ extension loaded more than once.
   - Hardcoded failsafe default risk limits in Settings.tsx when switching from dollar to percentage if the account balance is <= 0.
   - Fixed Settings tab to clear error state on typing new API keys.
   - Fixed CSS popup height glitch in SignalFeed.tsx by using lex-1 min-h-0.
+
+## [2026-08-20] Decision Log UI Fixes
+- Fixed the Portfolio Decision Log tab showing technical indicators (RSI, MACD, Hurst, Entropy) on 'Trade Rejected' items.
+- Added a professional 'Confidence' badge/box to the 'Trade Rejected' items so the user clearly understands why a trade was skipped.
