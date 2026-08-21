@@ -6,6 +6,10 @@ from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 import logging
+import threading
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logger = logging.getLogger("backend.main")
 
 from contextlib import asynccontextmanager
 from pydantic import BaseModel
@@ -45,6 +49,9 @@ from mt5_engine.config import DB_FILE as MT5_DB_FILE
 
 # Startup timestamp for health endpoint uptime calculation
 APP_START_TIME = datetime.now()
+
+# Global PyTorch Model Inference Lock to prevent concurrent forward-pass collisions
+_pytorch_inference_lock = threading.Lock()
 
 # Store active simulated trades to monitor for TP/SL hits
 OPEN_SIMULATED_TRADES = {}
@@ -106,25 +113,25 @@ async def simulated_trade_monitor_loop():
         except asyncio.CancelledError:
             break
         except Exception as e:
-            print(f"Simulated monitor error: {e}")
+            logger.error(f"Simulated monitor error: {e}")
 
 # === Unified Lifespan (starts BOTH Alpaca + MT5 engines) ===
 async def prewarm_market_cache():
-    """Keep the realtime quote cache warm at boot and every 30s so popup requests are instant."""
+    """Keep the realtime quote cache warm at boot and every 120s so popup requests are instant."""
     try:
         from data_providers import get_realtime_quotes
         default_symbols = ["EURUSD=X", "GBPUSD=X", "USDJPY=X", "AAPL", "TSLA", "NVDA", "BTC-USD", "ETH-USD", "SOL-USD"]
         while True:
             try:
                 quotes = await asyncio.to_thread(get_realtime_quotes, default_symbols, {})
-                print(f"Realtime cache refreshed: {len(quotes)}/{len(default_symbols)} symbols")
+                logger.info(f"Realtime cache refreshed: {len(quotes)}/{len(default_symbols)} symbols")
             except Exception as e:
-                print(f"Prewarm refresh error: {e}")
+                logger.warning(f"Prewarm refresh error: {e}")
             await asyncio.sleep(120)
     except asyncio.CancelledError:
         raise
     except Exception as e:
-        print(f"Prewarm loop failed: {e}")
+        logger.error(f"Prewarm loop failed: {e}")
 
 
 async def autonomous_market_scanner_loop():
@@ -158,9 +165,9 @@ async def autonomous_market_scanner_loop():
     try:
         async with _async_scan_lock:
             await _run_recommendation_scan(scan_request)
-        print(f"Autonomous market scanner: Initial startup scan completed ({len(SCAN_LOG)} events in SCAN_LOG)")
+        logger.info(f"Autonomous market scanner: Initial startup scan completed ({len(SCAN_LOG)} events in SCAN_LOG)")
     except Exception as e:
-        print(f"Autonomous market scanner startup scan error: {e}")
+        logger.error(f"Autonomous market scanner startup scan error: {e}")
 
     while True:
         try:
@@ -170,13 +177,30 @@ async def autonomous_market_scanner_loop():
         except asyncio.CancelledError:
             break
         except Exception as e:
-            print(f"Autonomous market scanner loop error: {e}")
+            logger.error(f"Autonomous market scanner loop error: {e}")
             await asyncio.sleep(5)
+
+
+async def autonomous_auto_trader_loop():
+    """
+    Autonomous server-side AutoTrader position monitoring loop.
+    Runs every 5 seconds in FastAPI lifespan to continuously monitor open positions,
+    trailing stops, breakeven triggers, and daily risk limits independently of frontend client polling.
+    """
+    while True:
+        try:
+            await asyncio.sleep(5)
+            if AUTO_TRADER and getattr(AUTO_TRADER, "enabled", False):
+                await asyncio.to_thread(AUTO_TRADER.monitor_positions)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Autonomous AutoTrader monitor error: {e}")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Unified lifespan: starts MT5 engine, news scraper, cross-market scanner, and autonomous scanner."""
+    """Unified lifespan: starts MT5 engine, news scraper, cross-market scanner, autonomous scanner, and auto-trader monitor."""
     # Start MT5 engine lifespan
     async with mt5_lifespan(app):
         # Start background tasks for upgrades
@@ -185,7 +209,9 @@ async def lifespan(app: FastAPI):
         simulated_monitor_task = asyncio.create_task(simulated_trade_monitor_loop())
         prewarm_task = asyncio.create_task(prewarm_market_cache())
         scanner_task = asyncio.create_task(autonomous_market_scanner_loop())
+        auto_trader_task = asyncio.create_task(autonomous_auto_trader_loop())
         yield
+        auto_trader_task.cancel()
         scanner_task.cancel()
         news_task.cancel()
         cross_market_task.cancel()
@@ -198,8 +224,7 @@ app = FastAPI(title="RUTE AI Trading Backend", version="2.0.0", lifespan=lifespa
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     body = await request.body()
-    print(f"422 Validation Error: {exc.errors()}")
-    print(f"Body: {body}")
+    logger.warning(f"422 Validation Error: {exc.errors()} | Body: {body}")
     return JSONResponse(status_code=422, content={"detail": str(exc.errors())})
 
 # CORS middleware to allow the Chrome extension (any chrome-extension:// origin)
@@ -224,11 +249,11 @@ AUTO_TRADER = None
 sentiment_hub = global_sentiment_hub  # Use the real LLM-powered one
 dqn_agent = DQNAgent(state_dim=61)
 try:
-    _dqn_path = os.path.join(os.path.dirname(__file__), "ml_engine", "models", "dqn_agent.pt")
+    _dqn_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ml_engine", "models", "dqn_agent.pt")
     if os.path.exists(_dqn_path):
         dqn_agent.load(_dqn_path)
-except Exception:
-    pass
+except Exception as e:
+    logger.warning(f"Startup DQN weight load notice: {e}")
 order_flow = OrderFlowAnalyzer()
 temporal_engine = None # Initialized on first use to detect input_dim
 
@@ -542,8 +567,10 @@ def get_market_data(symbol: str, api_keys: dict = None) -> Optional[Dict]:
         return None
 
 def calculate_technical_indicators(df: pd.DataFrame) -> TechnicalIndicators:
-    """Calculate technical indicators from price data"""
+    """Calculate technical indicators from price data (defensive copy)"""
     try:
+        # Prevent mutating cached DataFrames in place across worker threads
+        df = df.copy()
         # Use pandas_ta to calculate indicators
         df.ta.rsi(length=14, append=True)
         df.ta.macd(append=True)
@@ -880,26 +907,26 @@ def generate_trade_recommendation(symbol: str, asset_type: str, risk_settings: O
             if not tnx.empty:
                 tnx_feats = engineer.engineer_features(tnx.copy()).drop(columns=['target', 'future_return'], errors='ignore')
                 correlations.append(tnx_feats.iloc[-len(df):])
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Correlation asset context fetch notice for {symbol}: {e}")
 
         # 6. Sentiment veto (only when live feed is connected; stub always returns False)
         if sentiment_hub.filter_signal(symbol, trade_type):
             is_vetoed = True
 
-        # 7. Temporal LSTM cross-check — soft confidence modifier only.
+        # 7. Temporal LSTM / Transformer cross-check — soft confidence modifier only (thread-safe).
         try:
             temporal_pred = get_temporal_prediction(symbol, df, correlations if correlations else [])
             if trade_type == "BUY" and temporal_pred == -1:
-                confidence = max(confidence - 10, 0)   # LSTM disagrees — reduce confidence
+                confidence = max(confidence - 10, 0)   # Temporal model disagrees — reduce confidence
             elif trade_type == "SELL" and temporal_pred == 1:
                 confidence = max(confidence - 10, 0)
             elif trade_type == "BUY" and temporal_pred == 1:
-                confidence = min(confidence + 5, 95)   # LSTM agrees — small boost
+                confidence = min(confidence + 5, 95)   # Temporal model agrees — small boost
             elif trade_type == "SELL" and temporal_pred == -1:
                 confidence = min(confidence + 5, 95)
-        except Exception:
-            pass  # Never let a broken LSTM kill a signal
+        except Exception as e:
+            logger.warning(f"Temporal prediction modifier notice for {symbol}: {e}")
 
         # 7b. Multi-Timeframe SuperTrend confluence (H1/H4/D1 + EMA200 trend filter)
         boost_delta = 0
@@ -915,7 +942,7 @@ def generate_trade_recommendation(symbol: str, asset_type: str, risk_settings: O
                 details["confluence"] = conf_details
                 details["confluence_source"] = mtf_conf.get("source", "unknown")
         except Exception as e:
-            print(f"MTF confluence error for {symbol}: {e}")
+            logger.warning(f"MTF confluence notice for {symbol}: {e}")
 
         # 8. Order flow check (institutional wall)
         current_price = float(df['Close'].iloc[-1])
@@ -924,8 +951,8 @@ def generate_trade_recommendation(symbol: str, asset_type: str, risk_settings: O
             if order_flow.is_fighting_wall(symbol, current_price, trade_type, df):
                 is_vetoed = True
                 institutional_wall = True
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Order flow check notice for {symbol}: {e}")
 
         details["regime"] = regime
         details["hurst"] = round(hurst_val, 2)
@@ -950,7 +977,7 @@ def generate_trade_recommendation(symbol: str, asset_type: str, risk_settings: O
         stop_loss, take_profit = AdaptiveRiskManager.calculate_exits(current_price, trade_type, latest_atr)
         if stop_loss is None or take_profit is None:
             # ATR unavailable/invalid — fall back to configured %-based stops (3:1 R:R)
-            print(f"ATR invalid ({latest_atr}) for {symbol} — falling back to %-based stops")
+            logger.info(f"ATR invalid ({latest_atr}) for {symbol} — falling back to %-based stops")
             stop_loss, take_profit = (
                 current_price * (1 - stop_loss_pct / 100),
                 current_price * (1 + take_profit_pct / 100),
@@ -968,17 +995,18 @@ def generate_trade_recommendation(symbol: str, asset_type: str, risk_settings: O
 
         rec_id = str(uuid.uuid4())
 
-        # BUG #2 FIX: Store DQN state for later replay buffer insertion in /api/trade-outcome
+        # BUG #2 FIX: Store DQN state for later replay buffer insertion in /api/trade-outcome (thread-safe)
         try:
             feature_names = model_data['feature_names'] if model_data else []
             if feature_names and not df.empty:
                 state = df[feature_names].iloc[-1].values.astype(np.float32)
                 action = 1 if trade_type == 'BUY' else -1 if trade_type == 'SELL' else 0
-                PENDING_STATES[rec_id] = (state, action)
-                if len(PENDING_STATES) > 500:  # bound memory — drop oldest
-                    PENDING_STATES.pop(next(iter(PENDING_STATES)))
-        except Exception:
-            pass
+                with _pytorch_inference_lock:
+                    PENDING_STATES[rec_id] = (state, action)
+                    if len(PENDING_STATES) > 500:  # bound memory — drop oldest
+                        PENDING_STATES.pop(next(iter(PENDING_STATES)))
+        except Exception as e:
+            logger.warning(f"Failed to store DQN pending state for {rec_id}: {e}")
 
         # UPGRADE 1: Cross-Market confidence modifier
         cross_mod = cross_market_engine.get_signal_modifier(symbol, trade_type)
@@ -990,17 +1018,19 @@ def generate_trade_recommendation(symbol: str, asset_type: str, risk_settings: O
         kelly_alloc = capital_allocator.get_allocation()
 
         # UPGRADE 5: PPO trade parameters (only when trained weights exist —
-        # a random policy must never serve "learned" lot/trail/scale params)
+        # a random policy must never serve "learned" lot/trail/scale params; thread-safe)
         try:
             if getattr(ppo_agent, "trained", False):
                 ppo_state = df[model_data.get('feature_names', [])].iloc[-1:].values.astype(np.float32) if model_data and model_data.get('feature_names') else np.zeros(61)
-                ppo_params = ppo_agent.select_action(ppo_state)
-                PENDING_PPO_ACTIONS[rec_id] = ppo_params
-                if len(PENDING_PPO_ACTIONS) > 500:  # bound memory — drop oldest
-                    PENDING_PPO_ACTIONS.pop(next(iter(PENDING_PPO_ACTIONS)))
+                with _pytorch_inference_lock:
+                    ppo_params = ppo_agent.select_action(ppo_state)
+                    PENDING_PPO_ACTIONS[rec_id] = ppo_params
+                    if len(PENDING_PPO_ACTIONS) > 500:  # bound memory — drop oldest
+                        PENDING_PPO_ACTIONS.pop(next(iter(PENDING_PPO_ACTIONS)))
             else:
                 ppo_params = {"lot_multiplier": 1.0, "trail_atr": 1.5, "scale_out_pct": 25.0}
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Failed to generate PPO parameters for {symbol}: {e}")
             ppo_params = {"lot_multiplier": 1.0, "trail_atr": 1.5, "scale_out_pct": 25.0}
 
         return TradeRecommendation(
@@ -1031,13 +1061,11 @@ def generate_trade_recommendation(symbol: str, asset_type: str, risk_settings: O
             status="pending"
         )
     except Exception as e:
-        print(f"Error generating recommendation for {symbol}: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Error generating recommendation for {symbol}: {e}", exc_info=True)
         return None
 
 def get_temporal_prediction(symbol: str, df: pd.DataFrame, correlations: List[pd.DataFrame] = None) -> int:
-    """Get LSTM-based temporal prediction with CNS support"""
+    """Get LSTM / Transformer-based temporal prediction with CNS support (thread-safe)."""
     global temporal_engine
     try:
         main_feats = df.drop(columns=['Open', 'High', 'Low', 'Close', 'Volume', 'open', 'high', 'low', 'close', 'volume'], errors='ignore').values
@@ -1054,18 +1082,21 @@ def get_temporal_prediction(symbol: str, df: pd.DataFrame, correlations: List[pd
 
         feature_dim = main_feats.shape[1] + sum(c.shape[1] for c in corr_feats)
 
-        if temporal_engine is None or temporal_engine.model.lstm.input_size != feature_dim:
-            temporal_engine = TemporalEngine(feature_dim=feature_dim)
+        with _pytorch_inference_lock:
+            # Check model compatibility
+            curr_dim = getattr(getattr(getattr(temporal_engine, 'model', None), 'input_projection', None), 'in_features', None)
+            if temporal_engine is None or curr_dim != feature_dim:
+                temporal_engine = TemporalEngine(feature_dim=feature_dim)
 
-        # Guard against short sequences (use the engine's actual seq_len attribute)
-        if len(main_feats) < getattr(temporal_engine, 'seq_len', 14):
-            return 0
+            # Guard against short sequences (use the engine's actual seq_len attribute)
+            if len(main_feats) < getattr(temporal_engine, 'seq_len', 14):
+                return 0
 
-        # Prepare stacked sequence
-        seq = temporal_engine.prepare_sequence(main_feats, corr_feats)
-        return temporal_engine.predict(seq)
+            # Prepare stacked sequence and predict
+            seq = temporal_engine.prepare_sequence(main_feats, corr_feats)
+            return temporal_engine.predict(seq)
     except Exception as e:
-        print(f"Temporal CNS error: {e}")
+        logger.warning(f"Temporal CNS error for {symbol}: {e}")
         return 0
 
 
@@ -1232,8 +1263,8 @@ async def _run_recommendation_scan(request: RecommendationRequest):
                         "reasoning": recommendation.get("reason", "Conditions not met")
                     }
                 })
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"ThoughtLogger analysis logging notice for {sym}: {e}")
         elif recommendation:
             append_log_if_new({
                 "ts": datetime.now().isoformat(),
@@ -1267,8 +1298,8 @@ async def _run_recommendation_scan(request: RecommendationRequest):
                         "reasoning": getattr(recommendation.reasoning, 'summary', '')
                     }
                 })
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"ThoughtLogger signal logging notice for {sym}: {e}")
             # Monitor simulated trades and send Telegram Alerts
             if recommendation:
                 threshold = getattr(request.notifications, 'telegramThreshold', 80) if request.notifications else 80
@@ -2130,7 +2161,7 @@ async def get_symbol_thoughts(symbol: str):
     if not re.fullmatch(r"[A-Za-z0-9.=\-]+", symbol or ""):
         return {"error": "invalid symbol"}
 
-    thoughts_root = os.path.join(os.path.dirname(__file__), "reasoning_engine", "thoughts")
+    thoughts_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reasoning_engine", "thoughts")
     thoughts_dir = os.path.join(thoughts_root, symbol)
     if not os.path.realpath(thoughts_dir).startswith(os.path.realpath(thoughts_root)):
         return {"error": "invalid symbol"}
@@ -2157,8 +2188,8 @@ async def get_symbol_thoughts(symbol: str):
                     try:
                         with open(filepath, 'r') as f:
                             all_thoughts[key].append(json.load(f))
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"Error parsing thought file {filepath}: {e}")
 
         # 2. Direct .jsonl files in symbol directory
         for filename in sorted(os.listdir(thoughts_dir)):
@@ -2170,8 +2201,8 @@ async def get_symbol_thoughts(symbol: str):
                             line = line.strip()
                             if line:
                                 all_thoughts[key].append(json.loads(line))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Error parsing thought jsonl {filepath}: {e}")
 
     return all_thoughts
 
@@ -2180,16 +2211,36 @@ async def get_symbol_thoughts(symbol: str):
 async def get_learning_summary(days: int = 7):
     """
     What has RUTE learned recently?
-
     Shows patterns that work, mistakes to avoid, performance improvement
     """
     global AUTO_TRADER
 
-    if AUTO_TRADER is None:
-        return {"error": "Auto-trader not configured"}
+    if AUTO_TRADER is not None and hasattr(AUTO_TRADER, "improvement_engine"):
+        try:
+            return AUTO_TRADER.improvement_engine.get_learning_summary(days=days)
+        except Exception as e:
+            logger.warning(f"Error fetching improvement engine learning summary: {e}")
 
-    summary = AUTO_TRADER.improvement_engine.get_learning_summary(days=days)
-    return summary
+    # Fallback to ThoughtLogger insights if AutoTrader is not yet active
+    try:
+        from reasoning_engine import ThoughtLogger
+        tl = ThoughtLogger()
+        insights = tl.get_learning_insights(days=days)
+        return {
+            "status": "ready",
+            "performance_metrics": {
+                "total_trades": insights.get("total_trades", 0),
+                "wins": insights.get("wins", 0),
+                "losses": insights.get("losses", 0),
+                "win_rate": insights.get("win_rate", 0),
+            },
+            "patterns_learned": insights.get("patterns_learned", []),
+            "mistakes_corrected": insights.get("mistakes_corrected", []),
+            "insights": insights,
+        }
+    except Exception as e:
+        logger.warning(f"Error generating fallback learning summary: {e}")
+        return {"error": "Auto-trader not configured", "status": "idle"}
 
 
 @app.get("/api/learning/insights")
@@ -2197,8 +2248,13 @@ async def get_learning_insights():
     """Get detailed performance analytics and learning insights"""
     global AUTO_TRADER
 
-    if AUTO_TRADER is None:
-        return {"error": "Auto-trader not configured"}
+    if AUTO_TRADER is not None and hasattr(AUTO_TRADER, "improvement_engine"):
+        try:
+            from reasoning_engine import ThoughtLogger
+            thought_logger = ThoughtLogger()
+            return thought_logger.get_learning_insights(days=30)
+        except Exception as e:
+            logger.warning(f"Error fetching learning insights: {e}")
 
     from reasoning_engine import ThoughtLogger
     thought_logger = ThoughtLogger()

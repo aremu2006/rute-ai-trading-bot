@@ -7,6 +7,7 @@ Now upgraded with a Graph Neural Network (GNN) for shockwave propagation.
 import time
 import asyncio
 import logging
+import threading
 import pandas as pd
 from typing import Dict, Optional, List
 import numpy as np
@@ -67,6 +68,8 @@ class CrossMarketEngine:
         self._leader_data: Dict[str, dict] = {}   
         self._last_update = 0.0
         
+        self._lock = threading.RLock()
+        
         # Initialize GNN
         self.gnn = MarketGNN()
         self.nodes = list(self.LEADING_PAIRS.keys()) + list(set(f for sublist in self.LEADING_PAIRS.values() for f in sublist))
@@ -113,55 +116,54 @@ class CrossMarketEngine:
                 closes_safe = np.asarray(closes, dtype=float)
                 prev = closes_safe[-self.LOOKBACK_PERIODS:-1]
                 curr = closes_safe[-self.LOOKBACK_PERIODS:]
-                with np.errstate(divide='ignore', invalid='ignore'):
-                    returns = np.where(prev == 0, np.nan, np.diff(curr) / prev)
-                returns = returns[np.isfinite(returns)]
-                
-                z_score = 0.0
-                if len(returns) > 5:
-                    mean_ret = np.mean(returns)
-                    std_ret = np.std(returns)
-                    latest_ret = returns[-1] if len(returns) > 0 else 0
-                    if np.isfinite(std_ret) and std_ret > 0:
-                        z_score = (latest_ret - mean_ret) / std_ret
 
-                self._leader_data[leader] = {
-                    "roc_5": roc_5,
-                    "roc_15": roc_15,
-                    "roc_60": roc_60,
-                    "z_score": z_score,
-                    "last_close": closes[-1],
-                    "timestamp": now,
-                }
-                
-                # Update GNN feature matrix
+                if len(prev) >= 2:
+                    mean_val = float(np.mean(prev))
+                    std_val = float(np.std(prev))
+                    z = (closes_safe[-1] - mean_val) / std_val if std_val > 1e-8 else 0.0
+                else:
+                    z = 0.0
+
                 idx = self.node_to_idx[leader]
-                node_features[idx] = torch.tensor([z_score, roc_5, roc_15, roc_60])
+                node_features[idx] = torch.tensor([z, roc_5, roc_15, roc_60])
+
+                with self._lock:
+                    self._leader_data[leader] = {
+                        "price": float(closes[-1]),
+                        "z_score": float(z),
+                        "roc_5": float(roc_5),
+                        "roc_15": float(roc_15),
+                        "roc_60": float(roc_60),
+                        "timestamp": now,
+                    }
 
             except Exception as e:
                 log.warning(f"[CrossMarket] Failed to fetch {leader}: {e}")
-                self._leader_data.pop(leader, None)
+                with self._lock:
+                    self._leader_data.pop(leader, None)
 
         self._update_scores_gnn(node_features)
         self._last_update = now
 
     def _update_scores_gnn(self, node_features: torch.Tensor):
-        """Pass features through GNN to get signal modifiers."""
-        self.gnn.eval()
-        with torch.no_grad():
-            scores = self.gnn(node_features, self.adj_matrix)
-            
-        new_scores = {}
-        for node, idx in self.node_to_idx.items():
-            if node not in self.LEADING_PAIRS: # It's a follower
-                score = scores[idx].item()
-                # Multiply by 0.2 to keep modifier within sensible limits (-0.2 to 0.2)
-                new_scores[node] = score * 0.2
+        """Pass features through GNN to get signal modifiers (thread-safe)."""
+        with self._lock:
+            self.gnn.eval()
+            with torch.no_grad():
+                scores = self.gnn(node_features, self.adj_matrix)
                 
-        self._score_cache = new_scores
+            new_scores = {}
+            for node, idx in self.node_to_idx.items():
+                if node not in self.LEADING_PAIRS: # It's a follower
+                    score = scores[idx].item()
+                    # Multiply by 0.2 to keep modifier within sensible limits (-0.2 to 0.2)
+                    new_scores[node] = score * 0.2
+                    
+            self._score_cache = new_scores
 
     def get_signal_modifier(self, symbol: str, direction: str = "BUY") -> float:
-        modifier = self._score_cache.get(symbol, 0.0)
+        with self._lock:
+            modifier = self._score_cache.get(symbol, 0.0)
         if direction == "SELL":
             modifier = -modifier
         return round(modifier, 4)

@@ -1,27 +1,192 @@
 import time
+import copy
 import logging
+import threading
 import requests
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor
-from typing import List
+from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
-# Module-level Caches
-_realtime_cache = {}
-_historical_cache = {}
-_missing_keys_warned = set()
+
+class SynchronizedCache:
+    """
+    Thread-safe synchronized cache using threading.RLock.
+    Guarantees thread-safe reads, writes, expirations, and defensive copying
+    to prevent concurrent mutations across worker threads.
+    """
+    def __init__(self, ttl: float, max_entries: int = 500):
+        self._cache: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.RLock()
+        self._ttl = ttl
+        self._max_entries = max_entries
+
+    def get(self, key: str) -> Optional[Any]:
+        """Retrieve a defensive copy of cached data if present and unexpired."""
+        with self._lock:
+            entry = self._cache.get(key)
+            if entry is None:
+                return None
+            if time.time() - entry.get("timestamp", 0) > self._ttl:
+                self._cache.pop(key, None)
+                return None
+            data = entry.get("data")
+            if isinstance(data, pd.DataFrame):
+                return data.copy(deep=True)
+            elif isinstance(data, dict):
+                return copy.deepcopy(data)
+            elif isinstance(data, list):
+                return copy.deepcopy(data)
+            return data
+
+    def set(self, key: str, data: Any, timestamp: Optional[float] = None) -> None:
+        """Store a defensive copy of data in the cache with timestamp."""
+        with self._lock:
+            if len(self._cache) >= self._max_entries:
+                self._sweep_locked()
+            ts = timestamp if timestamp is not None else time.time()
+            data_to_store = (
+                data.copy(deep=True) if isinstance(data, pd.DataFrame)
+                else copy.deepcopy(data) if isinstance(data, (dict, list))
+                else data
+            )
+            self._cache[key] = {"timestamp": ts, "data": data_to_store}
+
+    def contains(self, key: str) -> bool:
+        """Check if a valid unexpired key exists in the cache."""
+        with self._lock:
+            entry = self._cache.get(key)
+            if entry is None:
+                return False
+            if time.time() - entry.get("timestamp", 0) > self._ttl:
+                self._cache.pop(key, None)
+                return False
+            return True
+
+    def pop(self, key: str, default=None) -> Any:
+        """Atomically remove and return an entry from cache."""
+        with self._lock:
+            entry = self._cache.pop(key, None)
+            if entry is None:
+                return default
+            data = entry.get("data")
+            return (
+                data.copy(deep=True) if isinstance(data, pd.DataFrame)
+                else copy.deepcopy(data) if isinstance(data, (dict, list))
+                else data
+            )
+
+    def clear(self) -> None:
+        """Clear all entries."""
+        with self._lock:
+            self._cache.clear()
+
+    def _sweep_locked(self) -> None:
+        """Internal sweep helper when lock is already acquired."""
+        now = time.time()
+        expired = [k for k, v in self._cache.items() if now - v.get("timestamp", 0) > self._ttl]
+        for k in expired:
+            self._cache.pop(k, None)
+        if len(self._cache) >= self._max_entries:
+            sorted_keys = sorted(self._cache.keys(), key=lambda k: self._cache[k].get("timestamp", 0))
+            for k in sorted_keys[:max(1, len(self._cache) - self._max_entries + 10)]:
+                self._cache.pop(k, None)
+
+    def sweep(self) -> None:
+        """Drop expired entries safely."""
+        with self._lock:
+            self._sweep_locked()
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._cache)
+
+    def __contains__(self, key: str) -> bool:
+        return self.contains(key)
+
+    def __getitem__(self, key: str) -> Dict[str, Any]:
+        with self._lock:
+            val = self.get(key)
+            if val is None:
+                raise KeyError(key)
+            entry = self._cache.get(key)
+            return {"timestamp": entry.get("timestamp", 0), "data": val}
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        if isinstance(value, dict) and "data" in value:
+            self.set(key, value["data"], value.get("timestamp"))
+        else:
+            self.set(key, value)
+
+
+class YahooCircuitBreaker:
+    """
+    Circuit breaker with exponential backoff for unauthenticated Yahoo Finance requests.
+    Prevents threadpool starvation and repetitive HTTP 429 timeouts when rate-limited.
+    """
+    def __init__(self, failure_threshold: int = 3, base_cooldown: float = 30.0, max_cooldown: float = 300.0):
+        self._lock = threading.RLock()
+        self._failure_count = 0
+        self._failure_threshold = failure_threshold
+        self._base_cooldown = base_cooldown
+        self._max_cooldown = max_cooldown
+        self._cooldown_until = 0.0
+        self._state = "CLOSED"  # CLOSED, OPEN, HALF-OPEN
+
+    def allow_request(self) -> bool:
+        with self._lock:
+            now = time.time()
+            if self._state == "OPEN":
+                if now >= self._cooldown_until:
+                    self._state = "HALF-OPEN"
+                    logger.info("Yahoo Circuit Breaker transitioned to HALF-OPEN (probing single request)")
+                    return True
+                return False
+            return True
+
+    def record_success(self) -> None:
+        with self._lock:
+            if self._failure_count > 0 or self._state != "CLOSED":
+                logger.info("Yahoo Circuit Breaker restored to CLOSED on successful response")
+            self._failure_count = 0
+            self._state = "CLOSED"
+            self._cooldown_until = 0.0
+
+    def record_failure(self, status_code: Optional[int] = None) -> None:
+        with self._lock:
+            self._failure_count += 1
+            if status_code == 429 or self._failure_count >= self._failure_threshold:
+                self._state = "OPEN"
+                backoff_factor = min(self._failure_count - self._failure_threshold, 4)
+                cooldown = min(self._base_cooldown * (2 ** max(backoff_factor, 0)), self._max_cooldown)
+                self._cooldown_until = time.time() + cooldown
+                logger.warning(
+                    f"Yahoo Circuit Breaker OPEN (failures={self._failure_count}, status={status_code}). "
+                    f"Cooling down for {cooldown:.1f}s until {time.strftime('%H:%M:%S', time.localtime(self._cooldown_until))}"
+                )
+
 
 # Cache TTLs
 REALTIME_TTL = 60  # 60 seconds
 HISTORICAL_TTL = 4 * 3600  # 4 hours
 
-def _sweep_cache(cache: dict, ttl: int) -> None:
-    """Drop expired entries so a long-running server doesn't grow unboundedly."""
-    now = time.time()
-    expired = [k for k, v in cache.items() if now - v.get('timestamp', 0) > ttl]
-    for k in expired:
-        cache.pop(k, None)
+# Module-level Thread-Safe Synchronized Caches & Circuit Breaker
+_realtime_cache = SynchronizedCache(ttl=REALTIME_TTL, max_entries=500)
+_historical_cache = SynchronizedCache(ttl=HISTORICAL_TTL, max_entries=500)
+_missing_keys_warned = set()
+_yahoo_circuit_breaker = YahooCircuitBreaker(failure_threshold=3, base_cooldown=30.0, max_cooldown=300.0)
+
+
+def _sweep_cache(cache: Any, ttl: int) -> None:
+    """Drop expired entries safely (supports both SynchronizedCache and plain dict)."""
+    if isinstance(cache, SynchronizedCache):
+        cache.sweep()
+    elif isinstance(cache, dict):
+        now = time.time()
+        expired = [k for k, v in cache.items() if now - v.get('timestamp', 0) > ttl]
+        for k in expired:
+            cache.pop(k, None)
 
 _CRYPTO_QUOTES = ("USDT", "USDC", "BUSD", "FDUSD", "DAI", "BTC", "ETH", "BNB")
 _CRYPTO_QUOTES_HYPHEN = _CRYPTO_QUOTES + ("EUR", "TRY")
@@ -80,6 +245,7 @@ def _yahoo_chart_url(symbol: str, interval: str, period: str = None) -> str:
 def get_realtime_quotes(symbols: List[str], api_keys: dict) -> List[dict]:
     """
     Get real-time quotes for a mix of crypto and stock/forex symbols.
+    Thread-safe and returns independent defensive copies of quote dictionaries.
     
     Args:
         symbols: List of ticker symbols
@@ -92,10 +258,11 @@ def get_realtime_quotes(symbols: List[str], api_keys: dict) -> List[dict]:
     results = []
     to_fetch = []
     
-    # Check cache
+    # Check thread-safe cache
     for sym in symbols:
-        if sym in _realtime_cache and now - _realtime_cache[sym]['timestamp'] < REALTIME_TTL:
-            results.append(_realtime_cache[sym]['data'])
+        cached = _realtime_cache.get(sym)
+        if cached is not None:
+            results.append(cached)
         else:
             to_fetch.append(sym)
             
@@ -130,8 +297,8 @@ def get_realtime_quotes(symbols: List[str], api_keys: dict) -> List[dict]:
                             "low": float(item['lowPrice']),
                             "lastUpdate": int(now)
                         }
-                        _realtime_cache[orig_sym] = {'timestamp': now, 'data': quote}
-                        results.append(quote)
+                        _realtime_cache.set(orig_sym, quote, now)
+                        results.append(copy.deepcopy(quote))
         except Exception as e:
             logger.error(f"Error fetching Binance quotes: {e}")
 
@@ -140,30 +307,30 @@ def get_realtime_quotes(symbols: List[str], api_keys: dict) -> List[dict]:
     finnhub_key = api_keys.get("finnhub")
     if stock_symbols:
         if not finnhub_key:
-            with ThreadPoolExecutor(max_workers=8) as pool:
+            with ThreadPoolExecutor(max_workers=min(8, len(stock_symbols))) as pool:
                 fetched = list(pool.map(lambda s: _fetch_yahoo_quote(s, now), stock_symbols))
             for quote in fetched:
                 if quote:
                     sym = quote["symbol"]
-                    _realtime_cache[sym] = {'timestamp': now, 'data': quote}
-                    results.append(quote)
+                    _realtime_cache.set(sym, quote, now)
+                    results.append(copy.deepcopy(quote))
         else:
-            with ThreadPoolExecutor(max_workers=8) as pool:
+            with ThreadPoolExecutor(max_workers=min(8, len(stock_symbols))) as pool:
                 fetched = list(pool.map(lambda s: _fetch_finnhub_quote(s, now, finnhub_key), stock_symbols))
             for quote in fetched:
                 if quote:
                     sym = quote["symbol"]
-                    _realtime_cache[sym] = {'timestamp': now, 'data': quote}
-                    results.append(quote)
-
-    if len(_realtime_cache) > 200:
-        _sweep_cache(_realtime_cache, REALTIME_TTL)
+                    _realtime_cache.set(sym, quote, now)
+                    results.append(copy.deepcopy(quote))
 
     return results
 
 
 def _fetch_yahoo_quote(sym: str, now: float, api_keys=None):
-    """Fetch a single Yahoo quote — safe to run inside a thread pool."""
+    """Fetch a single Yahoo quote protected by YahooCircuitBreaker."""
+    if not _yahoo_circuit_breaker.allow_request():
+        logger.debug(f"Yahoo quote request for {sym} skipped: Circuit Breaker is OPEN")
+        return None
     try:
         url = _yahoo_chart_url(sym, "1d")
         import random
@@ -176,13 +343,16 @@ def _fetch_yahoo_quote(sym: str, now: float, api_keys=None):
         ])
         resp = requests.get(url, timeout=10, headers={"User-Agent": ua})
         if resp.status_code != 200:
+            _yahoo_circuit_breaker.record_failure(status_code=resp.status_code)
             logger.error(f"Yahoo quote {sym}: HTTP {resp.status_code}")
             return None
         payload = resp.json()
         meta = payload.get("chart", {}).get("result", [{}])[0].get("meta", {})
         price = meta.get("regularMarketPrice")
         if price is None:
+            _yahoo_circuit_breaker.record_failure()
             return None
+        _yahoo_circuit_breaker.record_success()
         prev_close = meta.get("chartPreviousClose") or meta.get("previousClose") or price
         change = price - prev_close
         return {
@@ -197,6 +367,7 @@ def _fetch_yahoo_quote(sym: str, now: float, api_keys=None):
             "lastUpdate": int(now)
         }
     except Exception as e:
+        _yahoo_circuit_breaker.record_failure()
         logger.error(f"Error fetching Yahoo quote for {sym}: {e}")
         return None
 
@@ -229,7 +400,7 @@ def get_historical_ohlcv(symbol: str, period: str = "1y", interval: str = "1d", 
                          bypass_cache: bool = False) -> pd.DataFrame:
     """
     Get historical OHLCV data, trying Twelve Data first, then Alpha Vantage for stocks.
-    Crypto relies on Binance.
+    Crypto relies on Binance. Returns an independent defensive copy of the DataFrame.
     
     Args:
         symbol: Ticker symbol
@@ -247,9 +418,11 @@ def get_historical_ohlcv(symbol: str, period: str = "1y", interval: str = "1d", 
     now = time.time()
     cache_key = f"{symbol.upper()}_{period}_{interval}"
     
-    # Check cache
-    if not bypass_cache and cache_key in _historical_cache and now - _historical_cache[cache_key]['timestamp'] < HISTORICAL_TTL:
-        return _historical_cache[cache_key]['data']
+    # Check thread-safe cache
+    if not bypass_cache:
+        cached_df = _historical_cache.get(cache_key)
+        if cached_df is not None and not cached_df.empty:
+            return cached_df.copy(deep=True)
         
     df = pd.DataFrame()
     
@@ -364,7 +537,7 @@ def get_historical_ohlcv(symbol: str, period: str = "1y", interval: str = "1d", 
             except Exception as e:
                 logger.error(f"Error fetching AlphaVantage for {symbol}: {e}")
 
-        if not success:
+        if not success and _yahoo_circuit_breaker.allow_request():
             try:
                 url = _yahoo_chart_url(symbol, interval, period)
                 import random
@@ -392,8 +565,18 @@ def get_historical_ohlcv(symbol: str, period: str = "1y", interval: str = "1d", 
                         df = df.dropna(subset=["Close"])
                         df = df[~df.index.duplicated(keep="last")].sort_index()
                         df = df.tail(limit)
-                        success = True
+                        if not df.empty:
+                            _yahoo_circuit_breaker.record_success()
+                            success = True
+                        else:
+                            _yahoo_circuit_breaker.record_failure()
+                    else:
+                        _yahoo_circuit_breaker.record_failure()
+                else:
+                    _yahoo_circuit_breaker.record_failure(status_code=resp.status_code)
+                    logger.error(f"Yahoo historical {symbol}: HTTP {resp.status_code}")
             except Exception as e:
+                _yahoo_circuit_breaker.record_failure()
                 logger.error(f"Error fetching Yahoo historical for {symbol}: {e}")
 
         if not td_key and not av_key and not success:
@@ -405,11 +588,9 @@ def get_historical_ohlcv(symbol: str, period: str = "1y", interval: str = "1d", 
                 )
             
     if not df.empty:
-        _historical_cache[cache_key] = {'timestamp': now, 'data': df}
-        if len(_historical_cache) > 200:
-            _sweep_cache(_historical_cache, HISTORICAL_TTL)
+        _historical_cache.set(cache_key, df, now)
         
-    return df
+    return df.copy(deep=True) if isinstance(df, pd.DataFrame) else df
 
 def batch_prefetch_historical(symbols: List[str], period: str = "1y", interval: str = "1d", api_keys: dict = None) -> None:
     """

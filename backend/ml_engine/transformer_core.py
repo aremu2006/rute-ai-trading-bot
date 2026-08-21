@@ -1,4 +1,5 @@
 import os
+import threading
 import torch
 import torch.nn as nn
 import numpy as np
@@ -63,7 +64,8 @@ class TemporalEngine:
     def __init__(self, feature_dim: int):
         self.model = TimeAttentionTransformer(input_dim=feature_dim)
         self.seq_len = 14 # Lookback window
-        self.weights_path = os.path.join(os.path.dirname(__file__), 'models', 'temporal_transformer.pt')
+        self._lock = threading.RLock()
+        self.weights_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models', 'temporal_transformer.pt')
         self.weights_loaded = False
         if os.path.exists(self.weights_path):
             try:
@@ -95,14 +97,15 @@ class TemporalEngine:
         """
         Predict market direction: -1 (Sell), 0 (Hold), 1 (Buy)
         """
-        if not self.weights_loaded:
-            return 0  # No trained weights
-        self.model.eval()
-        with torch.no_grad():
-            outputs = self.model(sequence)
-            _, predicted = torch.max(outputs.data, 1)
-            # Map index back: 0 -> -1, 1 -> 0, 2 -> 1
-            return int(predicted.item()) - 1
+        with self._lock:
+            if not self.weights_loaded:
+                return 0  # No trained weights
+            self.model.eval()
+            with torch.no_grad():
+                outputs = self.model(sequence)
+                _, predicted = torch.max(outputs.data, 1)
+                # Map index back: 0 -> -1, 1 -> 0, 2 -> 1
+                return int(predicted.item()) - 1
 
     def train(self, X_sequences: np.ndarray, y_labels: np.ndarray, epochs: int = 10, lr: float = 0.001):
         """

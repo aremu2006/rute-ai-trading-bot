@@ -23,9 +23,12 @@ class ThoughtLogger:
     - WHAT it learned from the outcome
     """
 
-    def __init__(self, log_dir="reasoning_engine/thoughts"):
-        self.log_dir = log_dir
-        os.makedirs(log_dir, exist_ok=True)
+    def __init__(self, log_dir: Optional[str] = None):
+        if log_dir is None:
+            self.log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "thoughts")
+        else:
+            self.log_dir = os.path.abspath(log_dir) if not os.path.isabs(log_dir) else log_dir
+        os.makedirs(self.log_dir, exist_ok=True)
         self.current_session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     def log_analysis_thought(self, symbol: str, thought: Dict):

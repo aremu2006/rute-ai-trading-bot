@@ -1,9 +1,11 @@
 """
 PPO Reinforcement Learning Agent (Upgrade 5)
 Learns to optimize lot size, trailing ATR, and scale-out percentage.
+Thread-safe model execution and absolute path anchoring.
 """
 import os
 import logging
+import threading
 from typing import Dict, Optional
 
 import numpy as np
@@ -12,6 +14,8 @@ import torch.nn as nn
 from torch.distributions import Normal
 
 log = logging.getLogger("ml_engine.ppo_agent")
+
+DEFAULT_PPO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "ppo_agent.pt")
 
 
 class PPOBuffer:
@@ -114,6 +118,7 @@ class PPOAgent:
         self.eps_clip = eps_clip
         self.K_epochs = K_epochs
         self.min_buffer_size = 32
+        self._lock = threading.RLock()
 
         self.policy = ActorCritic(state_dim, action_dim)
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=lr)
@@ -128,136 +133,139 @@ class PPOAgent:
         Select trade parameters given a market state.
         Returns denormalized action values + internal metadata.
         """
-        state_t = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
-        self.policy.eval()
+        with self._lock:
+            state_t = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
+            self.policy.eval()
 
-        with torch.no_grad():
-            dist, value = self.policy.get_dist(state_t)
-            action_raw = dist.sample()
-            log_prob = dist.log_prob(action_raw).sum(dim=-1)
+            with torch.no_grad():
+                dist, value = self.policy.get_dist(state_t)
+                action_raw = dist.sample()
+                log_prob = dist.log_prob(action_raw).sum(dim=-1)
 
-        # Denormalize actions to trading ranges
-        action_np = action_raw.squeeze(0).numpy()
-        actions_scaled = {}
-        action_names = list(self.ACTION_RANGES.keys())
+            # Denormalize actions to trading ranges
+            action_np = action_raw.squeeze(0).numpy()
+            actions_scaled = {}
+            action_names = list(self.ACTION_RANGES.keys())
 
-        for i, name in enumerate(action_names):
-            lo, hi = self.ACTION_RANGES[name]
-            # Sigmoid-like clamping: map raw action to range
-            scaled = lo + (hi - lo) * (1 / (1 + np.exp(-action_np[i])))
-            actions_scaled[name] = round(float(scaled), 3)
+            for i, name in enumerate(action_names):
+                lo, hi = self.ACTION_RANGES[name]
+                # Sigmoid-like clamping: map raw action to range
+                scaled = lo + (hi - lo) * (1 / (1 + np.exp(-action_np[i])))
+                actions_scaled[name] = round(float(scaled), 3)
 
-        # Store for later reward assignment
-        action_id = id(state)
-        self._pending_actions[action_id] = {
-            "state": state,
-            "action_raw": action_np,
-            "log_prob": log_prob.item(),
-            "value": value.item(),
-        }
+            # Store for later reward assignment
+            action_id = id(state)
+            self._pending_actions[action_id] = {
+                "state": state,
+                "action_raw": action_np,
+                "log_prob": log_prob.item(),
+                "value": value.item(),
+            }
 
-        return {
-            **actions_scaled,
-            "_action_id": action_id,
-        }
+            return {
+                **actions_scaled,
+                "_action_id": action_id,
+            }
 
     def store_outcome(self, action_data: Dict, reward: float):
         """Record the outcome of a trade for the action that was taken."""
-        action_id = action_data.get("_action_id")
-        pending = self._pending_actions.pop(action_id, None)
+        with self._lock:
+            action_id = action_data.get("_action_id")
+            pending = self._pending_actions.pop(action_id, None)
 
-        if pending is None:
-            log.warning("[PPO] No pending action found for this outcome")
-            return
+            if pending is None:
+                log.warning("[PPO] No pending action found for this outcome")
+                return
 
-        self.buffer.store(
-            state=pending["state"],
-            action=pending["action_raw"],
-            log_prob=pending["log_prob"],
-            reward=reward,
-            value=pending["value"],
-        )
+            self.buffer.store(
+                state=pending["state"],
+                action=pending["action_raw"],
+                log_prob=pending["log_prob"],
+                reward=reward,
+                value=pending["value"],
+            )
 
-        # Auto-train when buffer is full enough
-        if len(self.buffer) >= self.min_buffer_size:
-            self.train()
+            # Auto-train when buffer is full enough
+            if len(self.buffer) >= self.min_buffer_size:
+                self.train()
 
     def _compute_returns(self, rewards: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
-        """Return rewards as-is: every stored experience is an independent
-        1-step episode (one trade → one outcome). Discounting across them
-        chained unrelated trades' outcomes into each other's returns, which
-        contaminated critic targets and advantages."""
+        """Return rewards as-is: every stored experience is an independent 1-step episode."""
         return rewards.clone()
 
     def train(self):
         """Run PPO update on collected experience."""
-        if len(self.buffer) < self.min_buffer_size:
-            return
+        with self._lock:
+            if len(self.buffer) < self.min_buffer_size:
+                return
 
-        states, actions, old_log_probs, rewards, old_values = self.buffer.get_tensors()
+            states, actions, old_log_probs, rewards, old_values = self.buffer.get_tensors()
 
-        # Normalize rewards
-        if rewards.std() > 1e-8:
-            rewards = (rewards - rewards.mean()) / rewards.std()
+            # Normalize rewards
+            if rewards.std() > 1e-8:
+                rewards = (rewards - rewards.mean()) / rewards.std()
 
-        returns = self._compute_returns(rewards, old_values)
-        advantages = returns - old_values
+            returns = self._compute_returns(rewards, old_values)
+            advantages = returns - old_values
 
-        # Normalize advantages
-        if advantages.std() > 1e-8:
-            advantages = (advantages - advantages.mean()) / advantages.std()
+            # Normalize advantages
+            if advantages.std() > 1e-8:
+                advantages = (advantages - advantages.mean()) / advantages.std()
 
-        self.policy.train()
+            self.policy.train()
 
-        for _ in range(self.K_epochs):
-            dist, values = self.policy.get_dist(states)
-            new_log_probs = dist.log_prob(actions).sum(dim=-1)
+            for _ in range(self.K_epochs):
+                dist, values = self.policy.get_dist(states)
+                new_log_probs = dist.log_prob(actions).sum(dim=-1)
 
-            # Ratio
-            ratios = torch.exp(new_log_probs - old_log_probs)
+                # Ratio
+                ratios = torch.exp(new_log_probs - old_log_probs)
 
-            # Clipped surrogate objective
-            surr1 = ratios * advantages
-            surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * advantages
-            actor_loss = -torch.min(surr1, surr2).mean()
+                # Clipped surrogate objective
+                surr1 = ratios * advantages
+                surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * advantages
+                actor_loss = -torch.min(surr1, surr2).mean()
 
-            # Value loss
-            critic_loss = nn.MSELoss()(values.squeeze(), returns)
+                # Value loss
+                critic_loss = nn.MSELoss()(values.squeeze(), returns)
 
-            # Entropy bonus
-            entropy = dist.entropy().mean()
+                # Entropy bonus
+                entropy = dist.entropy().mean()
 
-            loss = actor_loss + 0.5 * critic_loss - 0.01 * entropy
+                loss = actor_loss + 0.5 * critic_loss - 0.01 * entropy
 
-            self.optimizer.zero_grad()
-            loss.backward()
-            nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5)
-            self.optimizer.step()
+                self.optimizer.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5)
+                self.optimizer.step()
 
-        log.info(f"[PPO] Trained on {len(self.buffer)} experiences. "
-                 f"Loss={loss.item():.4f} Entropy={entropy.item():.4f}")
-        self.buffer.clear()
+            log.info(f"[PPO] Trained on {len(self.buffer)} experiences. "
+                     f"Loss={loss.item():.4f} Entropy={entropy.item():.4f}")
+            self.buffer.clear()
 
-    def save(self, path: str):
+    def save(self, path: Optional[str] = None):
         """Save model weights to disk."""
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        torch.save(self.policy.state_dict(), path)
-        log.info(f"[PPO] Model saved to {path}")
+        target_path = path or DEFAULT_PPO_PATH
+        os.makedirs(os.path.dirname(os.path.abspath(target_path)), exist_ok=True)
+        with self._lock:
+            torch.save(self.policy.state_dict(), target_path)
+            log.info(f"[PPO] Model saved to {target_path}")
 
-    def load(self, path: str):
+    def load(self, path: Optional[str] = None):
         """Load model weights from disk."""
-        if os.path.exists(path):
-            self.policy.load_state_dict(torch.load(path, weights_only=True))
-            self.policy.eval()
-            self.trained = True
-            log.info(f"[PPO] Model loaded from {path}")
+        target_path = path or DEFAULT_PPO_PATH
+        if os.path.exists(target_path):
+            with self._lock:
+                self.policy.load_state_dict(torch.load(target_path, weights_only=True))
+                self.policy.eval()
+                self.trained = True
+                log.info(f"[PPO] Model loaded from {target_path}")
         else:
-            log.warning(f"[PPO] No saved model at {path} — serving default parameters only")
+            log.warning(f"[PPO] No saved model at {target_path} — serving default parameters only")
 
 
 # Global instance
 ppo_agent = PPOAgent(state_dim=61, action_dim=3)
 
 # Try to load saved weights
-_default_path = os.path.join(os.path.dirname(__file__), "models", "ppo_agent.pt")
-ppo_agent.load(_default_path)
+ppo_agent.load(DEFAULT_PPO_PATH)
