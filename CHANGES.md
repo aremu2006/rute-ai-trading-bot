@@ -656,3 +656,13 @@ extension loaded more than once.
 ## [2026-08-21] Decision Log Frequency Fixes
 - Reduced the background scan alarm interval from 5 minutes to 1 minute, and reduced the scan throttle from 90 seconds to 30 seconds.
 - Disabled exact-match deduplication in the backend's scan log so the user can see periodic updates showing that the bot is actively scanning, preventing the log from appearing stagnant.
+
+## [2026-08-21] Auto-Trader Backend Persistence Fix
+- Discovered and fixed a critical issue where restarting the backend Python server would silently wipe the in-memory \AUTO_TRADER\ instance, preventing the bot from taking trades even when Auto-Trading was enabled in the extension. 
+- Implemented \syncAutoTraderToBackend()\ in the Chrome extension's background script. It now automatically resyncs the user's broker API keys, risk limits, and Auto-Trade status to the backend upon initialization and during every 1-minute keepalive heartbeat, ensuring the backend NEVER loses its ability to trade.
+
+## [2026-08-21] RL Model Deception & Duplicate Auto-Trade Fix
+- Identified a massive discrepancy where the Chrome extension's frontend was running its own 'simulated' Auto-Trade engine in parallel with the Python backend's real \AUTO_TRADER\.
+- The frontend was simulating DOM clicks, logging them as 'successful' trades, tracking them using live market data, and sending FAKE profit/loss outcomes back to the backend's RL model via \/api/trade-outcome\.
+- This fundamentally deceived the backend by 'double-counting' trades that were simulated, and poisoning the Reinforcement Learning model with fake data for trades that the backend may have rejected due to real risk limits.
+- **Fix**: Removed the entire \AUTO-TRADE ENGINE\ block and \checkTradeOutcomes\ logic from \ackground.ts\. Auto-Trading is now strictly handled by the robust Python backend which applies proper Kelly Criterion sizing and uses actual broker outcomes to train the RL engine.
