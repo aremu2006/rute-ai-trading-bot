@@ -9,7 +9,7 @@ let tradeLogsCache: TradeLog[] = [];
 const autoExecutedIds = new Set<string>();
 
 // Minimum gap between full recommendation scans (see fetchAIRecommendations).
-const SCAN_MIN_INTERVAL_MS = 90 * 1000;
+const SCAN_MIN_INTERVAL_MS = 30 * 1000;
 let lastScanStart = 0;
 
 // API endpoint
@@ -48,8 +48,8 @@ chrome.runtime.onInstalled.addListener(() => {
     // Set up periodic market data updates (every 1 minute)
     chrome.alarms.create('marketDataUpdate', { periodInMinutes: 1 });
 
-    // Set up AI recommendation updates (every 5 minutes)
-    chrome.alarms.create('aiRecommendations', { periodInMinutes: 5 });
+    // Set up AI recommendation updates (every 1 minute)
+    chrome.alarms.create('aiRecommendations', { periodInMinutes: 1 });
 
     // PWA/MV3 Keep-Alive (every 1 minute)
     chrome.alarms.create('keepAlive', { periodInMinutes: 1 });
@@ -78,7 +78,7 @@ chrome.alarms.getAll((alarms) => {
     restored = true;
   }
   if (!names.has('aiRecommendations')) {
-    chrome.alarms.create('aiRecommendations', { periodInMinutes: 5 });
+    chrome.alarms.create('aiRecommendations', { periodInMinutes: 1 });
     restored = true;
   }
   if (!names.has('keepAlive')) {

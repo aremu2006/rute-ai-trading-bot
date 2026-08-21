@@ -1109,16 +1109,8 @@ async def _run_recommendation_scan(request: RecommendationRequest):
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     def append_log_if_new(log_entry):
-        for existing in SCAN_LOG:
-            if existing.get("symbol") == log_entry.get("symbol") and existing.get("type") == log_entry.get("type"):
-                if existing.get("message") == log_entry.get("message"):
-                    existing["ts"] = log_entry["ts"]
-                    if "details" in log_entry:
-                        existing["details"] = log_entry["details"]
-                    SCAN_LOG.remove(existing)
-                    SCAN_LOG.appendleft(existing)
-                    return  # Skip duplicate spam but update time
-                break
+        # The user requested to see periodic logs to confirm the bot is active.
+        # We no longer deduplicate identical skip messages.
         SCAN_LOG.appendleft(log_entry)
 
     for i, recommendation in enumerate(results):

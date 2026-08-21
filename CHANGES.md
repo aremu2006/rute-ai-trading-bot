@@ -652,3 +652,7 @@ extension loaded more than once.
 ## [2026-08-20] Decision Log UI Fixes
 - Fixed the Portfolio Decision Log tab showing technical indicators (RSI, MACD, Hurst, Entropy) on 'Trade Rejected' items.
 - Added a professional 'Confidence' badge/box to the 'Trade Rejected' items so the user clearly understands why a trade was skipped.
+
+## [2026-08-21] Decision Log Frequency Fixes
+- Reduced the background scan alarm interval from 5 minutes to 1 minute, and reduced the scan throttle from 90 seconds to 30 seconds.
+- Disabled exact-match deduplication in the backend's scan log so the user can see periodic updates showing that the bot is actively scanning, preventing the log from appearing stagnant.
