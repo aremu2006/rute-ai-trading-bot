@@ -41,7 +41,7 @@ setTimeout(() => {
 chrome.runtime.onInstalled.addListener(() => {
   console.log('RUTE Trading Assistant installed');
 
-  // Initialize storage FIRST, then create alarms and fetch — otherwise the
+  // Initialize storage FIRST, then create alarms and fetch Ã¢â‚¬â€ otherwise the
   // first scan can fire against an empty watchlist while defaults are still
   // being written.
   initializeStorage().then(() => {
@@ -67,7 +67,7 @@ chrome.runtime.onInstalled.addListener(() => {
 
 // Self-healing alarms: MV3 silently loses `chrome.alarms` on extension reload
 // (and some Chrome versions clear them on browser update), so onInstalled's
-// registration alone is NOT reliable — this check runs on every worker wake
+// registration alone is NOT reliable Ã¢â‚¬â€ this check runs on every worker wake
 // and recreates whatever is missing, then kicks off an immediate scan so the
 // market never goes unmonitored.
 chrome.alarms.getAll((alarms) => {
@@ -86,7 +86,7 @@ chrome.alarms.getAll((alarms) => {
     restored = true;
   }
   if (restored) {
-    console.log('RUTE: Missing alarms restored — triggering immediate scan');
+    console.log('RUTE: Missing alarms restored Ã¢â‚¬â€ triggering immediate scan');
     updateMarketData();
     fetchAIRecommendations();
   }
@@ -151,6 +151,7 @@ function initializeStorage(): Promise<void> {
         chrome.storage.local.set({ tradeLogs: [] });
       }
 
+      syncAutoTraderToBackend();
       resolve();
     });
   });
@@ -164,6 +165,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     fetchAIRecommendations();
   } else if (alarm.name === 'keepAlive') {
     console.log('RUTE: Keep-alive heartbeat');
+    syncAutoTraderToBackend();
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       connectWebSocket();
     }
@@ -196,7 +198,7 @@ function connectWebSocket() {
     try {
       ws = new WebSocket(WS_ENDPOINT);
     } catch (e) {
-      console.error('RUTE: Invalid WebSocket endpoint — no connection will be made:', e);
+      console.error('RUTE: Invalid WebSocket endpoint Ã¢â‚¬â€ no connection will be made:', e);
       return;
     }
     socket = ws;
@@ -231,7 +233,7 @@ function connectWebSocket() {
           }
         });
 
-        // Update local recommendations if needed (debounced — multiple WS broadcasts
+        // Update local recommendations if needed (debounced Ã¢â‚¬â€ multiple WS broadcasts
         // can arrive back-to-back, and each refresh takes several seconds)
         if (!refreshDebounceId) {
           refreshDebounceId = setTimeout(() => {
@@ -243,19 +245,19 @@ function connectWebSocket() {
     };
 
     ws.onclose = () => {
-      // Only the CURRENT socket may schedule a reconnect — a stale socket that
+      // Only the CURRENT socket may schedule a reconnect Ã¢â‚¬â€ a stale socket that
       // closes while a newer connection exists must not spawn a duplicate loop.
       if (socket !== ws) return;
       console.log(`RUTE: WebSocket disconnected. Retrying in ${wsRetryDelay / 1000}s...`);
       setTimeout(connectWebSocket, wsRetryDelay);
-      // Exponential backoff: 2s → 5s → 10s → 15s (capped)
+      // Exponential backoff: 2s Ã¢â€ â€™ 5s Ã¢â€ â€™ 10s Ã¢â€ â€™ 15s (capped)
       wsRetryDelay = Math.min(wsRetryDelay * 2, WS_MAX_DELAY);
     };
 
     ws.onerror = (error) => {
       console.error('RUTE: WebSocket error:', error);
       // A socket stuck in CONNECTING never fires onclose, which would stall
-      // the reconnect loop forever — force-close so the onclose path runs.
+      // the reconnect loop forever Ã¢â‚¬â€ force-close so the onclose path runs.
       if (ws.readyState === WebSocket.CONNECTING) {
         try { ws.close(); } catch {}
       }
@@ -393,7 +395,7 @@ async function fetchAIRecommendations() {
   // function is also invoked by the 5-min alarm, popup refreshes and WS
   // signals. A full 7-symbol scan on EVERY wake flooded the scan log with
   // "Scanning..." starts and hammered the data providers. One scan per 90s
-  // is plenty — the 5-min alarm and explicit refreshes always pass.
+  // is plenty Ã¢â‚¬â€ the 5-min alarm and explicit refreshes always pass.
   const now = Date.now();
   if (now - lastScanStart < SCAN_MIN_INTERVAL_MS) {
     return;
@@ -461,7 +463,7 @@ async function fetchAIRecommendations() {
       }
       activeRecommendations = (activeRecommendations || []).map((r: any) => {
         const sig = stanceMap[r.symbol] || {};
-        // Preserve HOLD/NEUTRAL as-is — a neutral signal must NOT count as a
+        // Preserve HOLD/NEUTRAL as-is Ã¢â‚¬â€ a neutral signal must NOT count as a
         // sell agreement (which could tip notifications into firing on it).
         const type = String(r.type || '').toLowerCase();
         const want = type.startsWith('buy') ? 'buy' : type.startsWith('sell') ? 'sell' : 'hold';
@@ -484,7 +486,7 @@ async function fetchAIRecommendations() {
           if (result.userSettings?.notifications?.tradeAlerts && eligible.length > 0) {
             showNotification(
               'New Trade Recommendations',
-              `${eligible.length} opportunities detected${activeStrats.length > 0 ? ` — ${agreed.length} confirmed by your active strategies` : ''}`
+              `${eligible.length} opportunities detected${activeStrats.length > 0 ? ` Ã¢â‚¬â€ ${agreed.length} confirmed by your active strategies` : ''}`
             );
           }
         }
@@ -495,7 +497,7 @@ async function fetchAIRecommendations() {
         recommendations: activeRecommendations,
       }).catch(() => {});
 
-      // ─── AUTO-TRADE ENGINE ────────────────────────────────────────────────
+      // Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ AUTO-TRADE ENGINE Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
       // Read user settings and fire executeTrade() for any qualifying signal
       // that we haven't already acted on this session.
       const settings = result.userSettings;
@@ -531,7 +533,7 @@ async function fetchAIRecommendations() {
           for (const rec of activeRecommendations) {
             if (autoExecutedIds.has(rec.id)) continue;
             if ((rec.confidence ?? 0) < minConf) {
-              console.log(`RUTE Auto-Trade: ${rec.symbol} skipped — confidence ${rec.confidence}% < ${minConf}%`);
+              console.log(`RUTE Auto-Trade: ${rec.symbol} skipped Ã¢â‚¬â€ confidence ${rec.confidence}% < ${minConf}%`);
               continue;
             }
 
@@ -546,7 +548,7 @@ async function fetchAIRecommendations() {
           }
         });
       }
-      // ─────────────────────────────────────────────────────────────────────
+      // Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     } else {
       console.warn(`RUTE: /api/recommendations returned HTTP ${response.status}`);
     }
@@ -685,3 +687,54 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   return true;
 });
+
+
+function syncAutoTraderToBackend() {
+  chrome.storage.local.get(['userSettings', 'brokerConfig', 'minConfidence'], async (res) => {
+    const settings = res.userSettings;
+    if (!settings || !settings.riskSettings?.enableAutoTrade) return;
+    
+    let apiEndpoint = settings.apiEndpoint || 'http://127.0.0.1:8001';
+    if (apiEndpoint.includes('localhost')) apiEndpoint = apiEndpoint.replace('localhost', '127.0.0.1');
+
+    try {
+      const statusRes = await fetch(`${apiEndpoint}/api/auto-trade/status`);
+      const status = await statusRes.json();
+      
+      if (!status.configured) {
+        console.log('RUTE: Backend Auto-Trader not configured. Syncing settings...');
+        const balance = settings.riskSettings?.accountBalance || 0;
+        const isPct = settings.riskSettings?.riskType === 'percentage';
+        
+        const max_position_size = isPct && balance > 0 ? (settings.riskSettings.maxPositionSize || 0) / 100 * balance : (settings.riskSettings.maxPositionSize || 1000);
+        const max_daily_loss = isPct && balance > 0 ? (settings.riskSettings.maxDailyLoss || 0) / 100 * balance : (settings.riskSettings.maxDailyLoss || 0);
+        const max_daily_profit = isPct && balance > 0 ? (settings.riskSettings.maxDailyProfit || 0) / 100 * balance : (settings.riskSettings.maxDailyProfit || 1000);
+
+        await fetch(`${apiEndpoint}/api/auto-trade/setup`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            enabled: true,
+            broker_config: res.brokerConfig || { broker_type: 'demo' },
+            risk_type: settings.riskSettings.riskType || 'dollar',
+            max_position_size: max_position_size,
+            max_daily_loss: max_daily_loss,
+            max_daily_profit: max_daily_profit,
+            min_confidence: res.minConfidence || 70,
+            initial_stop_loss_pct: settings.riskSettings.stopLossPercentage || 2,
+            initial_take_profit_pct: settings.riskSettings.takeProfitPercentage || 5,
+            breakeven_trigger_pct: settings.riskSettings.breakevenTriggerPct || 2.0,
+            trailing_enabled: true,
+            trailing_activation_pct: settings.riskSettings.trailingActivationPct || 5.0,
+            trailing_distance_pct: settings.riskSettings.trailingDistancePct || 1.5,
+            trailing_step_pct: settings.riskSettings.trailingStepPct || 0.5,
+          }),
+        });
+        console.log('RUTE: Auto-Trader backend sync complete.');
+      }
+    } catch (err) {
+      console.warn('RUTE: Could not sync auto-trader to backend', err);
+    }
+  });
+}
+
