@@ -1,4 +1,4 @@
-import { TradeRecommendation, MarketData, TradeLog, UserSettings } from '../types';
+﻿import { TradeRecommendation, MarketData, TradeLog, UserSettings } from '../types';
 
 // Store for active recommendations and market data
 let activeRecommendations: TradeRecommendation[] = [];
@@ -41,7 +41,7 @@ setTimeout(() => {
 chrome.runtime.onInstalled.addListener(() => {
   console.log('RUTE Trading Assistant installed');
 
-  // Initialize storage FIRST, then create alarms and fetch Ã¢â‚¬â€ otherwise the
+  // Initialize storage FIRST, then create alarms and fetch ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â otherwise the
   // first scan can fire against an empty watchlist while defaults are still
   // being written.
   initializeStorage().then(() => {
@@ -67,7 +67,7 @@ chrome.runtime.onInstalled.addListener(() => {
 
 // Self-healing alarms: MV3 silently loses `chrome.alarms` on extension reload
 // (and some Chrome versions clear them on browser update), so onInstalled's
-// registration alone is NOT reliable Ã¢â‚¬â€ this check runs on every worker wake
+// registration alone is NOT reliable ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â this check runs on every worker wake
 // and recreates whatever is missing, then kicks off an immediate scan so the
 // market never goes unmonitored.
 chrome.alarms.getAll((alarms) => {
@@ -86,7 +86,7 @@ chrome.alarms.getAll((alarms) => {
     restored = true;
   }
   if (restored) {
-    console.log('RUTE: Missing alarms restored Ã¢â‚¬â€ triggering immediate scan');
+    console.log('RUTE: Missing alarms restored ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â triggering immediate scan');
     updateMarketData();
     fetchAIRecommendations();
   }
@@ -198,7 +198,7 @@ function connectWebSocket() {
     try {
       ws = new WebSocket(WS_ENDPOINT);
     } catch (e) {
-      console.error('RUTE: Invalid WebSocket endpoint Ã¢â‚¬â€ no connection will be made:', e);
+      console.error('RUTE: Invalid WebSocket endpoint ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â no connection will be made:', e);
       return;
     }
     socket = ws;
@@ -233,7 +233,7 @@ function connectWebSocket() {
           }
         });
 
-        // Update local recommendations if needed (debounced Ã¢â‚¬â€ multiple WS broadcasts
+        // Update local recommendations if needed (debounced ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â multiple WS broadcasts
         // can arrive back-to-back, and each refresh takes several seconds)
         if (!refreshDebounceId) {
           refreshDebounceId = setTimeout(() => {
@@ -245,19 +245,19 @@ function connectWebSocket() {
     };
 
     ws.onclose = () => {
-      // Only the CURRENT socket may schedule a reconnect Ã¢â‚¬â€ a stale socket that
+      // Only the CURRENT socket may schedule a reconnect ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â a stale socket that
       // closes while a newer connection exists must not spawn a duplicate loop.
       if (socket !== ws) return;
       console.log(`RUTE: WebSocket disconnected. Retrying in ${wsRetryDelay / 1000}s...`);
       setTimeout(connectWebSocket, wsRetryDelay);
-      // Exponential backoff: 2s Ã¢â€ â€™ 5s Ã¢â€ â€™ 10s Ã¢â€ â€™ 15s (capped)
+      // Exponential backoff: 2s ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ 5s ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ 10s ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ 15s (capped)
       wsRetryDelay = Math.min(wsRetryDelay * 2, WS_MAX_DELAY);
     };
 
     ws.onerror = (error) => {
       console.error('RUTE: WebSocket error:', error);
       // A socket stuck in CONNECTING never fires onclose, which would stall
-      // the reconnect loop forever Ã¢â‚¬â€ force-close so the onclose path runs.
+      // the reconnect loop forever ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â force-close so the onclose path runs.
       if (ws.readyState === WebSocket.CONNECTING) {
         try { ws.close(); } catch {}
       }
@@ -365,20 +365,7 @@ function checkTradeOutcomes(marketData: Record<string, MarketData>) {
       };
       updated = true;
       
-      // Notify the backend RL engine (DQN/PPO)
-      chrome.storage.local.get(['userSettings'], (res) => {
-        let ep = res.userSettings?.apiEndpoint || API_ENDPOINT;
-        if (ep.includes('localhost')) ep = ep.replace('localhost', '127.0.0.1');
-        fetch(`${ep}/api/trade-outcome`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            signal_id: log.recommendation.id,
-            profit,
-            exit_reason: exitReason
-          })
-        }).catch(err => console.error('RUTE RL Feedback Error:', err));
-      });
+      
       
       showNotification('Trade Closed', `${log.recommendation.symbol} hit ${exitReason}. Profit: $${profit.toFixed(2)}`);
     }
@@ -395,7 +382,7 @@ async function fetchAIRecommendations() {
   // function is also invoked by the 5-min alarm, popup refreshes and WS
   // signals. A full 7-symbol scan on EVERY wake flooded the scan log with
   // "Scanning..." starts and hammered the data providers. One scan per 90s
-  // is plenty Ã¢â‚¬â€ the 5-min alarm and explicit refreshes always pass.
+  // is plenty ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â the 5-min alarm and explicit refreshes always pass.
   const now = Date.now();
   if (now - lastScanStart < SCAN_MIN_INTERVAL_MS) {
     return;
@@ -463,7 +450,7 @@ async function fetchAIRecommendations() {
       }
       activeRecommendations = (activeRecommendations || []).map((r: any) => {
         const sig = stanceMap[r.symbol] || {};
-        // Preserve HOLD/NEUTRAL as-is Ã¢â‚¬â€ a neutral signal must NOT count as a
+        // Preserve HOLD/NEUTRAL as-is ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â a neutral signal must NOT count as a
         // sell agreement (which could tip notifications into firing on it).
         const type = String(r.type || '').toLowerCase();
         const want = type.startsWith('buy') ? 'buy' : type.startsWith('sell') ? 'sell' : 'hold';
@@ -486,7 +473,7 @@ async function fetchAIRecommendations() {
           if (result.userSettings?.notifications?.tradeAlerts && eligible.length > 0) {
             showNotification(
               'New Trade Recommendations',
-              `${eligible.length} opportunities detected${activeStrats.length > 0 ? ` Ã¢â‚¬â€ ${agreed.length} confirmed by your active strategies` : ''}`
+              `${eligible.length} opportunities detected${activeStrats.length > 0 ? ` ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â ${agreed.length} confirmed by your active strategies` : ''}`
             );
           }
         }
@@ -497,59 +484,7 @@ async function fetchAIRecommendations() {
         recommendations: activeRecommendations,
       }).catch(() => {});
 
-      // Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ AUTO-TRADE ENGINE Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
-      // Read user settings and fire executeTrade() for any qualifying signal
-      // that we haven't already acted on this session.
-      const settings = result.userSettings;
-      const autoTradeEnabled = settings?.riskSettings?.enableAutoTrade === true;
-
-      if (autoTradeEnabled && activeRecommendations.length > 0) {
-        // Read minConfidence from storage (set in Settings slider)
-        chrome.storage.local.get(['minConfidence', 'tradeLogs'], async (cfg) => {
-          const minConf: number = cfg.minConfidence ?? 70;
-
-          // Daily loss guard: sum profits of today's closed trades
-          const todayStart = new Date().setHours(0, 0, 0, 0);
-          const todayLoss = (cfg.tradeLogs || []).reduce((sum: number, log: TradeLog) => {
-            if (log.result && log.result.exitedAt >= todayStart && log.result.profit < 0) {
-              return sum + log.result.profit;
-            }
-            return sum;
-          }, 0);
-          const balance = settings?.riskSettings?.accountBalance ?? 0;
-          const isPct = settings?.riskSettings?.riskType === 'percentage';
-          let maxDailyLoss = settings?.riskSettings?.maxDailyLoss ?? 500;
-          if (isPct && balance > 0) {
-            maxDailyLoss = (maxDailyLoss / 100) * balance;
-          }
-          
-          if (Math.abs(todayLoss) >= maxDailyLoss) {
-            console.warn(`RUTE Auto-Trade: Daily loss limit hit ($${todayLoss.toFixed(2)}). Pausing.`);
-            return;
-          }
-
-          // Fire on all recommendations that pass the confidence bar and
-          // haven't already been executed this session.
-          for (const rec of activeRecommendations) {
-            if (autoExecutedIds.has(rec.id)) continue;
-            if ((rec.confidence ?? 0) < minConf) {
-              console.log(`RUTE Auto-Trade: ${rec.symbol} skipped Ã¢â‚¬â€ confidence ${rec.confidence}% < ${minConf}%`);
-              continue;
-            }
-
-            console.log(`RUTE Auto-Trade: EXECUTING ${rec.type} ${rec.symbol} @ ${rec.confidence}% confidence`);
-            autoExecutedIds.add(rec.id);
-
-            try {
-              await executeTrade(rec);
-            } catch (err) {
-              console.error(`RUTE Auto-Trade: Failed to execute ${rec.symbol}:`, err);
-            }
-          }
-        });
-      }
-      // Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
-    } else {
+      } else {
       console.warn(`RUTE: /api/recommendations returned HTTP ${response.status}`);
     }
   } catch (error) {
@@ -651,7 +586,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (activeRecommendations.length > 0) {
       sendResponse({ recommendations: activeRecommendations });
     } else {
-      // Worker just woke up and hasn't refetched yet — serve from storage.
+      // Worker just woke up and hasn't refetched yet â€” serve from storage.
       chrome.storage.local.get(['rute_recommendations'], (result) => {
         sendResponse({ recommendations: result.rute_recommendations || [] });
       });
@@ -737,4 +672,5 @@ function syncAutoTraderToBackend() {
     }
   });
 }
+
 
