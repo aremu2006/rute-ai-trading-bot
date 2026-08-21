@@ -255,6 +255,33 @@ class FeatureEngineer:
 
         return df
 
+    def add_order_book_proxy_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Calculates proxies for Level 2 Order Book Imbalance since we don't have L2 WebSockets.
+        Uses intra-candle price action, wick sizes, and volume to estimate buy vs sell walls.
+        """
+        # 1. Buy vs Sell Pressure (Wick to Body ratio)
+        candle_range = df['High'] - df['Low']
+        candle_range = candle_range.replace(0, 1e-8) # avoid div by zero
+        
+        # Upper wick = resistance/sell wall proxy. Lower wick = support/buy wall proxy
+        upper_wick = df['High'] - df[['Open', 'Close']].max(axis=1)
+        lower_wick = df[['Open', 'Close']].min(axis=1) - df['Low']
+        
+        df['l2_sell_wall_proxy'] = upper_wick / candle_range
+        df['l2_buy_wall_proxy'] = lower_wick / candle_range
+        
+        # 2. Volume-Weighted Imbalance
+        # If closing near the high with high volume -> Buy imbalance
+        # If closing near the low with high volume -> Sell imbalance
+        close_location = (df['Close'] - df['Low']) / candle_range
+        df['l2_volume_imbalance'] = (close_location - 0.5) * df['Volume']
+        
+        # Smooth it out to see resting walls
+        df['l2_imbalance_sma'] = df['l2_volume_imbalance'].rolling(window=5).mean()
+        
+        return df
+
     def engineer_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Apply all feature engineering"""
         print("Engineering features...")
@@ -267,6 +294,7 @@ class FeatureEngineer:
         df = self.add_volume_indicators(df)
         df = self.add_higher_timeframe_features(df)
         df = self.add_candle_patterns(df)
+        df = self.add_order_book_proxy_features(df)
 
         # Add target
         df = self.add_target(df)

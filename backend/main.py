@@ -1665,7 +1665,9 @@ async def record_trade_outcome(data: dict):
     signal_id = data.get("signal_id")
     profit = data.get("profit", 0)
     exit_reason = data.get("exit_reason", "Auto-Exit")
-    reward = 1.0 if profit >= 0 else -1.0 
+    
+    # Continuous Risk-Adjusted Reward (e.g. +2.5 for 2.5% gain, -1.0 for 1.0% loss)
+    reward = profit * 100.0 
     
     print(f"RUTE RL: Signal {signal_id} outcome received. Reward: {reward} | Reason: {exit_reason}")
     

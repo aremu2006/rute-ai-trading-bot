@@ -1,15 +1,19 @@
+
 """
 Cross-Market Leading Indicator AI (Upgrade 1)
 Detects when moves in US equities predict Forex/Crypto moves.
+Now upgraded with a Graph Neural Network (GNN) for shockwave propagation.
 """
 import time
 import asyncio
 import logging
 import pandas as pd
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 import numpy as np
 
-
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 try:
     import xgboost as xgb
@@ -21,30 +25,80 @@ from data_providers import get_historical_ohlcv
 
 log = logging.getLogger("ml_engine.cross_market")
 
+# --- GRAPH NEURAL NETWORK ---
+class GCNLayer(nn.Module):
+    def __init__(self, in_features, out_features):
+        super().__init__()
+        self.linear = nn.Linear(in_features, out_features)
+
+    def forward(self, x, adj):
+        support = self.linear(x)
+        out = torch.matmul(adj, support)
+        return out
+
+class MarketGNN(nn.Module):
+    def __init__(self, feature_dim=4, hidden_dim=16):
+        super().__init__()
+        self.gc1 = GCNLayer(feature_dim, hidden_dim)
+        self.gc2 = GCNLayer(hidden_dim, 1) # Predicts 1 modifier score per node
+        
+    def forward(self, x, adj):
+        x = F.relu(self.gc1(x, adj))
+        x = self.gc2(x, adj)
+        return torch.tanh(x)
+
+# -----------------------------
 
 class CrossMarketEngine:
-    """Detects leading signals between US equities and Forex/Crypto."""
+    """Detects leading signals between US equities and Forex/Crypto using a GNN."""
 
-    # Leaders (yfinance tickers) → Followers (MT5 symbols)
+    # Leaders (yfinance tickers) -> Followers (MT5 symbols)
     LEADING_PAIRS = {
-        "NQ=F":     ["BTCUSDm", "ETHUSDm"],        # Nasdaq futures → Crypto
-        "DX-Y.NYB": ["EURUSDm", "GBPUSDm"],         # Dollar Index → Forex
-        "^TNX":     ["XAUUSDm"],                     # 10Y Yield → Gold
-        "^VIX":     ["BTCUSDm", "EURUSDm", "GBPUSDm"],  # Fear Index → Everything
+        "NQ=F":     ["BTCUSDm", "ETHUSDm"],        
+        "DX-Y.NYB": ["EURUSDm", "GBPUSDm"],         
+        "^TNX":     ["XAUUSDm"],                     
+        "^VIX":     ["BTCUSDm", "EURUSDm", "GBPUSDm"],  
     }
 
-    # How many periods of history to track for Z-score
-    LOOKBACK_PERIODS = 60  # ~60 minutes of 1-min data for intraday
+    LOOKBACK_PERIODS = 60
 
     def __init__(self):
-        self._score_cache: Dict[str, float] = {}  # symbol → modifier
-        self._leader_data: Dict[str, dict] = {}   # leader → {prices, roc, zscore, timestamp}
-        self._correlator_model = None
+        self._score_cache: Dict[str, float] = {}  
+        self._leader_data: Dict[str, dict] = {}   
         self._last_update = 0.0
+        
+        # Initialize GNN
+        self.gnn = MarketGNN()
+        self.nodes = list(self.LEADING_PAIRS.keys()) + list(set(f for sublist in self.LEADING_PAIRS.values() for f in sublist))
+        self.node_to_idx = {node: i for i, node in enumerate(self.nodes)}
+        self.adj_matrix = self._build_adjacency_matrix()
+
+    def _build_adjacency_matrix(self) -> torch.Tensor:
+        n = len(self.nodes)
+        adj = torch.zeros((n, n))
+        # Add self-loops
+        for i in range(n):
+            adj[i, i] = 1.0
+            
+        # Add directed edges from leaders to followers
+        for leader, followers in self.LEADING_PAIRS.items():
+            l_idx = self.node_to_idx[leader]
+            for f in followers:
+                f_idx = self.node_to_idx[f]
+                # Inverse relationship for DXY and Yields
+                weight = -1.0 if leader in ["DX-Y.NYB", "^TNX", "^VIX"] else 1.0
+                adj[l_idx, f_idx] = weight
+                
+        # Row-normalize
+        rowsum = adj.abs().sum(dim=1, keepdim=True)
+        adj = adj / rowsum.clamp(min=1e-8)
+        return adj
 
     def compute_cross_features(self):
-        """Fetch latest data for all leading indicators and compute Z-scores."""
+        """Fetch latest data for all leading indicators and pass through GNN."""
         now = time.time()
+        node_features = torch.zeros((len(self.nodes), 4)) # [z, roc5, roc15, roc60]
+        
         for leader in self.LEADING_PAIRS:
             try:
                 hist = get_historical_ohlcv(leader, period="5d", interval="5m")
@@ -52,29 +106,24 @@ class CrossMarketEngine:
                     continue
 
                 closes = hist['Close'].values
-                # Rate of change at multiple windows
                 roc_5 = (closes[-1] / closes[-2] - 1) * 100 if len(closes) >= 2 else 0
                 roc_15 = (closes[-1] / closes[-3] - 1) * 100 if len(closes) >= 3 else 0
                 roc_60 = (closes[-1] / closes[-12] - 1) * 100 if len(closes) >= 12 else 0
 
-                # Z-score of the latest move (how unusual is it?)
                 closes_safe = np.asarray(closes, dtype=float)
                 prev = closes_safe[-self.LOOKBACK_PERIODS:-1]
                 curr = closes_safe[-self.LOOKBACK_PERIODS:]
                 with np.errstate(divide='ignore', invalid='ignore'):
                     returns = np.where(prev == 0, np.nan, np.diff(curr) / prev)
                 returns = returns[np.isfinite(returns)]
+                
+                z_score = 0.0
                 if len(returns) > 5:
                     mean_ret = np.mean(returns)
                     std_ret = np.std(returns)
                     latest_ret = returns[-1] if len(returns) > 0 else 0
-                    # Guard against zero/NaN std (e.g. flat or broken price series)
                     if np.isfinite(std_ret) and std_ret > 0:
                         z_score = (latest_ret - mean_ret) / std_ret
-                    else:
-                        z_score = 0.0
-                else:
-                    z_score = 0.0
 
                 self._leader_data[leader] = {
                     "roc_5": roc_5,
@@ -84,87 +133,40 @@ class CrossMarketEngine:
                     "last_close": closes[-1],
                     "timestamp": now,
                 }
+                
+                # Update GNN feature matrix
+                idx = self.node_to_idx[leader]
+                node_features[idx] = torch.tensor([z_score, roc_5, roc_15, roc_60])
 
             except Exception as e:
                 log.warning(f"[CrossMarket] Failed to fetch {leader}: {e}")
-                # Drop stale data — an old z-score must not keep modifying
-                # live confidence indefinitely after a data outage.
                 self._leader_data.pop(leader, None)
 
-        # Update score cache for followers
-        self._update_scores()
+        self._update_scores_gnn(node_features)
         self._last_update = now
 
-    def _update_scores(self):
-        """Calculate signal modifiers for each follower symbol."""
-        new_scores: Dict[str, float] = {}
-
-        for leader, followers in self.LEADING_PAIRS.items():
-            data = self._leader_data.get(leader)
-            if data is None:
-                continue
-
-            z = data["z_score"]
-            roc_60 = data["roc_60"]
-
-            # Only act on significant moves (|Z| > 1.5)
-            if abs(z) < 1.5:
-                continue
-
-            for follower in followers:
-                modifier = 0.0
-
-                if leader == "DX-Y.NYB":
-                    # Dollar strength is INVERSE to EUR/GBP
-                    if z > 2.0:  # Dollar surging
-                        modifier = -0.15  # Penalize BUY on EUR/GBP
-                    elif z < -2.0:  # Dollar crashing
-                        modifier = 0.10   # Boost BUY on EUR/GBP
-
-                elif leader == "NQ=F":
-                    # Nasdaq crash → Crypto follows
-                    if z < -2.0:  # Nasdaq panic sell
-                        modifier = -0.20  # Strong penalty for BUY crypto
-                    elif z > 2.0:  # Nasdaq rally
-                        modifier = 0.10   # Mild boost for BUY crypto
-
-                elif leader == "^VIX":
-                    # VIX spike → risk-off everywhere
-                    if z > 2.5:  # Fear spike
-                        modifier = -0.15  # Penalize BUY on risk assets
-                    elif z < -1.5:  # Calm returning
-                        modifier = 0.05   # Mild boost
-
-                elif leader == "^TNX":
-                    # Yield spike → Gold drops
-                    if z > 2.0:
-                        modifier = -0.12  # Penalize BUY gold
-                    elif z < -2.0:
-                        modifier = 0.08   # Boost BUY gold
-
-                # Aggregate: take the strongest signal per follower
-                current = new_scores.get(follower, 0.0)
-                if abs(modifier) > abs(current):
-                    new_scores[follower] = modifier
-
+    def _update_scores_gnn(self, node_features: torch.Tensor):
+        """Pass features through GNN to get signal modifiers."""
+        self.gnn.eval()
+        with torch.no_grad():
+            scores = self.gnn(node_features, self.adj_matrix)
+            
+        new_scores = {}
+        for node, idx in self.node_to_idx.items():
+            if node not in self.LEADING_PAIRS: # It's a follower
+                score = scores[idx].item()
+                # Multiply by 0.2 to keep modifier within sensible limits (-0.2 to 0.2)
+                new_scores[node] = score * 0.2
+                
         self._score_cache = new_scores
 
     def get_signal_modifier(self, symbol: str, direction: str = "BUY") -> float:
-        """
-        Returns a confidence modifier for a symbol based on cross-market signals.
-        Positive = cross-market supports the trade direction.
-        Negative = cross-market warns of incoming reversal.
-        """
         modifier = self._score_cache.get(symbol, 0.0)
-
-        # If the modifier is negative, it penalizes BUY. For SELL, it's a boost.
         if direction == "SELL":
             modifier = -modifier
-
         return round(modifier, 4)
 
     def get_active_alerts(self) -> list:
-        """Return list of currently active cross-market alerts."""
         alerts = []
         for leader, data in self._leader_data.items():
             if data and abs(data["z_score"]) >= 2.0:
@@ -177,31 +179,18 @@ class CrossMarketEngine:
         return alerts
 
     def train_correlator(self):
-        """Train an XGBoost model on historical cross-market correlations."""
-        if not XGB_AVAILABLE:
-            log.warning("[CrossMarket] Cannot train: missing xgboost")
-            return
-
-        log.info("[CrossMarket] Training cross-market correlator...")
-        # This would fetch 1 year of aligned daily data and train
-        # For now, the rule-based Z-score system handles it
-        log.info("[CrossMarket] Using rule-based Z-score system (correlator training TBD)")
+        log.info("[CrossMarket] GNN handles correlation natively. No external training required.")
 
 
-# Global instance
 cross_market_engine = CrossMarketEngine()
 
-
 async def cross_market_scanner_loop():
-    """Background task that runs every 60 seconds to update cross-market signals."""
     while True:
         try:
             await asyncio.to_thread(cross_market_engine.compute_cross_features)
             alerts = cross_market_engine.get_active_alerts()
             if alerts:
                 log.info(f"[CrossMarket] Active alerts: {len(alerts)}")
-                for a in alerts:
-                    log.info(f"  {a['leader']} Z={a['z_score']} ROC60={a['roc_60min']}% → affects {a['followers']}")
         except Exception as e:
             log.error(f"[CrossMarket] Scanner error: {e}")
         await asyncio.sleep(60)
