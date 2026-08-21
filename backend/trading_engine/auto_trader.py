@@ -124,7 +124,7 @@ class AutoTrader:
         # All checks passed
         return True, "All checks passed"
 
-    def calculate_position_size(self, entry_price: float, stop_loss: float, win_prob: float = 0.55, r_r: float = 3.0) -> Tuple[int, float]:
+    def calculate_position_size(self, entry_price: float, stop_loss: float, symbol: str = "", win_prob: float = 0.55, r_r: float = 3.0) -> Tuple[Union[int, float], float]:
         """
         Calculate position size based on Kelly Criterion
         Uses historical win rate from KellyAllocator, falling back to ML confidence.
@@ -161,7 +161,7 @@ class AutoTrader:
         position_size = min(position_size, max_qty)
 
         # Normalize to standard lots for Forex
-        if len(symbol) == 6 and symbol.isalpha() and not "BTC" in symbol.upper():
+        if symbol and len(symbol) == 6 and symbol.isalpha() and not "BTC" in symbol.upper():
             position_size = position_size / 100000.0
 
         # Round to 8 decimals to support fractional crypto quantities
@@ -186,19 +186,22 @@ class AutoTrader:
             entry_price = recommendation.get("entryPrice", 0.0)
 
             # 📝 LOG ANALYSIS THOUGHT
-            self.thought_logger.log_analysis_thought(symbol, {
-                "observation": f"{symbol} at ${entry_price:.2f}",
-                "technical_analysis": {
-                    "indicators": recommendation.get("reasoning", {}).get("technicalIndicators", []),
-                    "market_trend": recommendation.get("reasoning", {}).get("marketTrend", "Unknown"),
-                    "sentiment": recommendation.get("reasoning", {}).get("sentiment", "Unknown")
-                },
-                "ml_analysis": {
-                    "prediction": trade_type,
-                    "confidence": confidence,
-                    "reasoning": recommendation.get("reasoning", {}).get("summary", "")
-                }
-            })
+            try:
+                self.thought_logger.log_analysis_thought(symbol, {
+                    "observation": f"{symbol} at ${entry_price:.2f}",
+                    "technical_analysis": {
+                        "indicators": recommendation.get("reasoning", {}).get("technicalIndicators", []),
+                        "market_trend": recommendation.get("reasoning", {}).get("marketTrend", "Unknown"),
+                        "sentiment": recommendation.get("reasoning", {}).get("sentiment", "Unknown")
+                    },
+                    "ml_analysis": {
+                        "prediction": trade_type,
+                        "confidence": confidence,
+                        "reasoning": recommendation.get("reasoning", {}).get("summary", "")
+                    }
+                })
+            except Exception as log_err:
+                logger.warning(f"Failed to log analysis thought: {log_err}")
 
             # Check if should execute
             should_execute, reason = self.should_execute_trade(recommendation)
@@ -207,11 +210,14 @@ class AutoTrader:
                 logger.info(f"⊘ Trade skipped: {reason}")
 
                 # 📝 LOG DECISION NOT TO TRADE
-                self.thought_logger.log_decision_thought(symbol, {
-                    "decision": "SKIP_TRADE",
-                    "reasoning_chain": [f"Trade skipped: {reason}"],
-                    "confidence_breakdown": {"final_confidence": confidence}
-                })
+                try:
+                    self.thought_logger.log_decision_thought(symbol, {
+                        "decision": "SKIP_TRADE",
+                        "reasoning_chain": [f"Trade skipped: {reason}"],
+                        "confidence_breakdown": {"final_confidence": confidence}
+                    })
+                except Exception as log_err:
+                    logger.warning(f"Failed to log decision thought: {log_err}")
 
                 return {
                     "executed": False,
@@ -225,7 +231,7 @@ class AutoTrader:
             r_r = abs(take_profit - entry_price) / max(abs(entry_price - stop_loss), 1e-6)
 
             # Calculate position size via Kelly Allocator
-            quantity, risk_amount = self.calculate_position_size(entry_price, stop_loss, win_prob=win_prob, r_r=r_r)
+            quantity, risk_amount = self.calculate_position_size(entry_price, stop_loss, symbol=symbol, win_prob=win_prob, r_r=r_r)
 
             if quantity < self._min_quantity(symbol):
                 return {

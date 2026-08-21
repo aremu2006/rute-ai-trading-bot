@@ -127,9 +127,56 @@ async def prewarm_market_cache():
         print(f"Prewarm loop failed: {e}")
 
 
+async def autonomous_market_scanner_loop():
+    """
+    Autonomous background market scanner loop.
+    Periodically evaluates active market symbols (EURUSD, GBPUSD, BTC-USD, ETH-USD, XAUUSD, etc.)
+    using the ML engine, continuously appending timestamped decision and scan entries to SCAN_LOG.
+    """
+    default_symbols = [
+        Symbol(symbol="EURUSD=X", assetType="FOREX"),
+        Symbol(symbol="GBPUSD=X", assetType="FOREX"),
+        Symbol(symbol="BTC-USD", assetType="CRYPTO"),
+        Symbol(symbol="ETH-USD", assetType="CRYPTO"),
+        Symbol(symbol="XAUUSD=X", assetType="COMMODITY"),
+        Symbol(symbol="AAPL", assetType="STOCK"),
+        Symbol(symbol="NVDA", assetType="STOCK"),
+    ]
+    scan_request = RecommendationRequest(
+        symbols=default_symbols,
+        riskSettings=RiskSettings(
+            maxPositionSize=1000,
+            maxDailyLoss=500,
+            stopLossPercentage=2.0,
+            takeProfitPercentage=6.0,
+            enableAutoTrade=False,
+            minConfidence=50
+        )
+    )
+
+    # Initial scan immediately on startup
+    try:
+        async with _async_scan_lock:
+            await _run_recommendation_scan(scan_request)
+        print(f"Autonomous market scanner: Initial startup scan completed ({len(SCAN_LOG)} events in SCAN_LOG)")
+    except Exception as e:
+        print(f"Autonomous market scanner startup scan error: {e}")
+
+    while True:
+        try:
+            await asyncio.sleep(12)  # evaluate every 10–15 seconds
+            async with _async_scan_lock:
+                await _run_recommendation_scan(scan_request)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            print(f"Autonomous market scanner loop error: {e}")
+            await asyncio.sleep(5)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Unified lifespan: starts MT5 engine, news scraper, and cross-market scanner."""
+    """Unified lifespan: starts MT5 engine, news scraper, cross-market scanner, and autonomous scanner."""
     # Start MT5 engine lifespan
     async with mt5_lifespan(app):
         # Start background tasks for upgrades
@@ -137,7 +184,9 @@ async def lifespan(app: FastAPI):
         cross_market_task = asyncio.create_task(cross_market_scanner_loop())
         simulated_monitor_task = asyncio.create_task(simulated_trade_monitor_loop())
         prewarm_task = asyncio.create_task(prewarm_market_cache())
+        scanner_task = asyncio.create_task(autonomous_market_scanner_loop())
         yield
+        scanner_task.cancel()
         news_task.cancel()
         cross_market_task.cancel()
         simulated_monitor_task.cancel()
@@ -265,8 +314,12 @@ def load_ml_model(symbol: str):
 
     model_dir = os.path.join(os.path.dirname(__file__), "ml_engine", "models")
     # Support both .joblib and legacy .model extensions
+    clean_sym = symbol.replace("=X", "").replace("-USD", "USD").replace("-", "").upper()
     model_files = glob.glob(os.path.join(model_dir, f"{symbol}_*.joblib")) + \
                   glob.glob(os.path.join(model_dir, f"{symbol}_*.model"))
+    if not model_files and clean_sym != symbol:
+        model_files = glob.glob(os.path.join(model_dir, f"{clean_sym}_*.joblib")) + \
+                      glob.glob(os.path.join(model_dir, f"{clean_sym}_*.model"))
 
     if not model_files:
         return None
@@ -342,7 +395,7 @@ class RecommendationRequest(BaseModel):
     apiKeys: Optional[ApiKeys] = None
 
 class MarketDataRequest(BaseModel):
-    symbols: List[str]
+    symbols: List[str] = ["EURUSD=X", "GBPUSD=X", "USDJPY=X", "BTC-USD", "ETH-USD", "AAPL"]
     apiKeys: Optional[ApiKeys] = None
 
 class TechnicalIndicators(BaseModel):
@@ -409,6 +462,7 @@ SCAN_LOG: deque = deque(maxlen=1000)
 # batch pre-fetch + analysis and flood the scan log with orphaned starts.
 import threading
 _scan_lock = threading.Lock()
+_async_scan_lock = asyncio.Lock()
 
 def get_market_data(symbol: str, api_keys: dict = None) -> Optional[Dict]:
     """Fetch market data for a symbol (MT5 for Crypto/Forex, Data Providers for Stocks)"""
@@ -1032,21 +1086,50 @@ async def test_telegram_endpoint(req: TelegramTestRequest):
         return {"success": True, "message": "✅ Message sent! Check your Telegram."}
     return {"success": False, "message": f"❌ Telegram error: {detail}"}
 
-@app.post("/api/market-data")
-async def get_market_data_endpoint(request: MarketDataRequest):
-    """Get real-time market data for multiple symbols"""
+@app.get("/api/market-data")
+async def get_market_data_get_endpoint(symbols: Optional[str] = None, limit: int = 50):
+    """Get real-time market data and live bot decision events (GET)"""
+    symbol_list = [s.strip() for s in symbols.split(",")] if symbols else [
+        "EURUSD=X", "GBPUSD=X", "USDJPY=X", "BTC-USD", "ETH-USD", "XAUUSD=X", "AAPL", "NVDA"
+    ]
     market_data = {}
-    api_keys_dict = request.apiKeys.dict() if request.apiKeys else {}
-
-    # Run all get_market_data calls in parallel to fix slow response times
-    tasks = [asyncio.to_thread(get_market_data, symbol, api_keys_dict) for symbol in request.symbols]
+    tasks = [asyncio.to_thread(get_market_data, symbol, {}) for symbol in symbol_list]
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    
-    for symbol, data in zip(request.symbols, results):
+
+    for symbol, data in zip(symbol_list, results):
         if not isinstance(data, Exception) and data:
             market_data[symbol] = data
 
-    return {"marketData": market_data}
+    return {
+        "marketData": market_data,
+        "events": list(SCAN_LOG)[:limit],
+        "status": "active"
+    }
+
+@app.post("/api/market-data")
+async def get_market_data_endpoint(request: Optional[MarketDataRequest] = None):
+    """Get real-time market data and live bot decision events for multiple symbols (POST)"""
+    if request is None or not request.symbols:
+        symbols = ["EURUSD=X", "GBPUSD=X", "USDJPY=X", "BTC-USD", "ETH-USD", "XAUUSD=X", "AAPL", "NVDA"]
+        api_keys_dict = {}
+    else:
+        symbols = request.symbols
+        api_keys_dict = request.apiKeys.dict() if request.apiKeys else {}
+
+    market_data = {}
+    # Run all get_market_data calls in parallel to fix slow response times
+    tasks = [asyncio.to_thread(get_market_data, symbol, api_keys_dict) for symbol in symbols]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    for symbol, data in zip(symbols, results):
+        if not isinstance(data, Exception) and data:
+            market_data[symbol] = data
+
+    return {
+        "marketData": market_data,
+        "events": list(SCAN_LOG)[:50],
+        "status": "active"
+    }
 
 @app.post("/api/recommendations")
 async def get_recommendations(request: RecommendationRequest):
@@ -1058,22 +1141,17 @@ async def get_recommendations(request: RecommendationRequest):
 
     Math: Even with 45% win rate, 3:1 R:R generates consistent profits over time.
     """
-    # Concurrency guard: the extension can fire overlapping scans (worker
-    # wake fetches + 5-min alarm + popup refresh + multiple extension
-    # instances). Each overlapping scan repeats the batch pre-fetch and 7
-    # recommendation generations, hammering data providers (rate limits ->
-    # slow scans) and flooding SCAN_LOG with orphaned "scan_start" entries
-    # that push real results out of view.
-    if not _scan_lock.acquire(blocking=False):
+    try:
+        async with _async_scan_lock:
+            return await _run_recommendation_scan(request)
+    except Exception as e:
+        print(f"Recommendations scan error: {e}")
         return {
             "recommendations": [],
-            "status": "scan_in_progress",
-            "message": "A scan is already running — request skipped to avoid duplicate work.",
+            "status": "error",
+            "message": str(e),
+            "events": list(SCAN_LOG)[:50]
         }
-    try:
-        return await _run_recommendation_scan(request)
-    finally:
-        _scan_lock.release()
 
 
 async def _run_recommendation_scan(request: RecommendationRequest):
@@ -1093,7 +1171,10 @@ async def _run_recommendation_scan(request: RecommendationRequest):
 
     # Pre-fetch historical data for all symbols in one batch request
     symbols_to_fetch = [s.symbol for s in request.symbols]
-    await asyncio.to_thread(batch_prefetch_historical, symbols_to_fetch, "1y", "1d", api_keys_dict)
+    try:
+        await asyncio.to_thread(batch_prefetch_historical, symbols_to_fetch, "1y", "1d", api_keys_dict)
+    except Exception as prefetch_err:
+        print(f"Batch prefetch notice: {prefetch_err}")
 
     # Run all generate_trade_recommendation calls in parallel to fix slow response times
     tasks = [
@@ -1134,6 +1215,25 @@ async def _run_recommendation_scan(request: RecommendationRequest):
                 "signals": recommendation.get("signals", []),
                 "status": "skipped"
             })
+            # Thought logging for skipped evaluation
+            try:
+                from reasoning_engine import ThoughtLogger
+                _tl = ThoughtLogger()
+                _tl.log_analysis_thought(sym, {
+                    "observation": f"{sym} evaluated in market scan: skipped",
+                    "technical_analysis": {
+                        "indicators": recommendation.get("signals", []),
+                        "market_trend": "Neutral",
+                        "sentiment": "Neutral"
+                    },
+                    "ml_analysis": {
+                        "prediction": "HOLD",
+                        "confidence": recommendation.get("confidence", 0),
+                        "reasoning": recommendation.get("reason", "Conditions not met")
+                    }
+                })
+            except Exception:
+                pass
         elif recommendation:
             append_log_if_new({
                 "ts": datetime.now().isoformat(),
@@ -1144,12 +1244,31 @@ async def _run_recommendation_scan(request: RecommendationRequest):
                 "entry": recommendation.entryPrice,
                 "stop_loss": recommendation.stopLoss,
                 "take_profit": recommendation.takeProfit,
-                "signals": recommendation.reasoning.technicalIndicators,
+                "signals": recommendation.reasoning.technicalIndicators if hasattr(recommendation, 'reasoning') else [],
                 "message": f"{sym}: {recommendation.type} signal at ${recommendation.entryPrice:.4f} — {recommendation.confidence}% confidence",
                 "details": getattr(recommendation, "details", {}),
                 "status": "signal"
             })
             recommendations.append(recommendation)
+            # Thought logging for recommendation signal
+            try:
+                from reasoning_engine import ThoughtLogger
+                _tl = ThoughtLogger()
+                _tl.log_analysis_thought(sym, {
+                    "observation": f"{sym} generated {recommendation.type} signal at ${recommendation.entryPrice:.4f}",
+                    "technical_analysis": {
+                        "indicators": recommendation.reasoning.technicalIndicators if hasattr(recommendation, 'reasoning') else [],
+                        "market_trend": getattr(recommendation.reasoning, 'marketTrend', 'Bullish' if recommendation.type == 'BUY' else 'Bearish'),
+                        "sentiment": getattr(recommendation.reasoning, 'sentiment', 'Positive' if recommendation.type == 'BUY' else 'Negative')
+                    },
+                    "ml_analysis": {
+                        "prediction": recommendation.type,
+                        "confidence": recommendation.confidence,
+                        "reasoning": getattr(recommendation.reasoning, 'summary', '')
+                    }
+                })
+            except Exception:
+                pass
             # Monitor simulated trades and send Telegram Alerts
             if recommendation:
                 threshold = getattr(request.notifications, 'telegramThreshold', 80) if request.notifications else 80
@@ -1183,11 +1302,11 @@ async def _run_recommendation_scan(request: RecommendationRequest):
                             )
                         )
         else:
-            SCAN_LOG.appendleft({
+            append_log_if_new({
                 "ts": datetime.now().isoformat(),
                 "type": "skip",
                 "symbol": sym,
-                "message": f"[{sym} Loop Audit] Signal: SKIP | Score: 0.0000 | Min Required: 0.75 | Insufficient market data or error",
+                "message": f"[{sym} Loop Audit] Signal: SKIP | Score: 0.0000 | Min Required: 0.50 | Insufficient market data or conditions not met",
                 "status": "skip"
             })
 
@@ -2006,11 +2125,6 @@ async def get_symbol_thoughts(symbol: str):
     - Why it decided to trade or not
     - What it learned from the outcome
     """
-    global AUTO_TRADER
-
-    if AUTO_TRADER is None:
-        return {"error": "Auto-trader not configured"}
-
     # Path traversal guard: symbols come from the URL unvalidated, and ".."
     # or "%5C" would escape the thoughts root on Windows.
     if not re.fullmatch(r"[A-Za-z0-9.=\-]+", symbol or ""):
@@ -2021,7 +2135,7 @@ async def get_symbol_thoughts(symbol: str):
     if not os.path.realpath(thoughts_dir).startswith(os.path.realpath(thoughts_root)):
         return {"error": "invalid symbol"}
     if not os.path.exists(thoughts_dir):
-        return {"symbol": symbol, "thoughts": [], "message": "No thoughts logged yet"}
+        return {"symbol": symbol, "thoughts": [], "analysis": [], "decisions": [], "executions": [], "outcomes": [], "message": "No thoughts logged yet"}
 
     all_thoughts = {
         "symbol": symbol,
@@ -2033,12 +2147,31 @@ async def get_symbol_thoughts(symbol: str):
 
     # Read all thought files
     for thought_type in ["analysis", "decision", "execution", "outcome"]:
+        key = f"{thought_type}s" if thought_type != "analysis" else thought_type
+        # 1. Subdirectory .json files
         type_dir = os.path.join(thoughts_dir, thought_type)
         if os.path.exists(type_dir):
             for filename in sorted(os.listdir(type_dir)):
-                filepath = os.path.join(type_dir, filename)
-                with open(filepath, 'r') as f:
-                    all_thoughts[f"{thought_type}s" if thought_type != "analysis" else thought_type].append(json.load(f))
+                if filename.endswith(".json"):
+                    filepath = os.path.join(type_dir, filename)
+                    try:
+                        with open(filepath, 'r') as f:
+                            all_thoughts[key].append(json.load(f))
+                    except Exception:
+                        pass
+
+        # 2. Direct .jsonl files in symbol directory
+        for filename in sorted(os.listdir(thoughts_dir)):
+            if filename.startswith(f"{symbol}_{thought_type}") and filename.endswith(".jsonl"):
+                filepath = os.path.join(thoughts_dir, filename)
+                try:
+                    with open(filepath, 'r') as f:
+                        for line in f:
+                            line = line.strip()
+                            if line:
+                                all_thoughts[key].append(json.loads(line))
+                except Exception:
+                    pass
 
     return all_thoughts
 
